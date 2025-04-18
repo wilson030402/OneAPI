@@ -2,16 +2,8 @@
 #include <sycl/sycl.hpp>
 #include "exception_handler.hpp"
 
-// ------------------------------------------------------------------
-//  Paramètres dimensionnels ―————► RENSEIGNEZ‑LES ICI
-// ------------------------------------------------------------------
-constexpr int kRows = 10;   // NEW : nombre de lignes de la matrice source
-constexpr int kCols = 30;   // NEW : nombre de colonnes de la matrice source
-
-constexpr int kBank     = 1;
-constexpr int kElements = kRows * kCols;
-
-class TransposeKernel;          // nom lisible dans le rapport d’IP
+constexpr int Kbl1 = 1;                 
+class TransposeKernel;
 class IdPipeA;
 
 using pipe_props = decltype(sycl::ext::oneapi::experimental::properties(
@@ -20,29 +12,27 @@ using pipe_props = decltype(sycl::ext::oneapi::experimental::properties(
 using InputPipe =
     sycl::ext::intel::experimental::pipe<IdPipeA, int, 0, pipe_props>;
 
-// ------------------------------------------------------------------
-//  Kernel : lit la matrice source (kRows × kCols) ligne par ligne
-//           et écrit sa transposée (kCols × kRows) en mémoire Avalon‑MM.
-// ------------------------------------------------------------------
 struct Transpose {
+  
   sycl::ext::oneapi::experimental::annotated_arg<
       int*,
       decltype(sycl::ext::oneapi::experimental::properties{
-          sycl::ext::intel::experimental::buffer_location<kBank>,
+          sycl::ext::intel::experimental::buffer_location<Kbl1>,
           sycl::ext::intel::experimental::dwidth<32>,
           sycl::ext::intel::experimental::latency<0>,
           sycl::ext::intel::experimental::read_write_mode_write,
           sycl::ext::oneapi::experimental::alignment<4>})>
       out_ptr;
 
+  
+  uint32_t rows;
+  uint32_t cols;
+
   void operator()() const {
-#pragma unroll
-    for (int r = 0; r < kRows; ++r) {     // NEW
-#pragma unroll
-      for (int c = 0; c < kCols; ++c) {   // NEW
+    for (uint32_t r = 0; r < rows; ++r) {
+      for (uint32_t c = 0; c < cols; ++c) {
         int v = InputPipe::read();
-        //  Indice [r][c] devient [c][r] dans la sortie
-        out_ptr[c * kRows + r] = v;       // NEW : kRows (et non kCols) !
+        out_ptr[c * rows + r] = v;       // indice [c][r] dans la transposée
       }
     }
   }
@@ -62,37 +52,35 @@ int main() {
     std::cout << "Device : "
               << q.get_device().get_info<sycl::info::device::name>() << '\n';
 
-    // Buffer de sortie (taille kCols × kRows) dans le banc mémoire 1
+    // Taille de la matricee --- A MODIFIER
+    const uint32_t rows = 2048;    
+    const uint32_t cols = 32;
+    const size_t   elements = rows * cols;
+
     int* b = sycl::malloc_shared<int>(
-        kElements, q,
-        {sycl::ext::intel::experimental::property::usm::buffer_location(kBank)});
+        elements, q,
+        {sycl::ext::intel::experimental::property::usm::buffer_location(Kbl1)});
 
-    // Génération/écriture de la matrice source sur le pipe -----------
-    // Valeur = r * kCols + c  pour une lecture claire du résultat.
-    for (int r = 0; r < kRows; ++r) {
-      for (int c = 0; c < kCols; ++c) {
-        InputPipe::write(q, r * kCols + c);          // NEW
-        std::cout <<  r* kCols + c << " " ;
+    for (uint32_t r = 0; r < rows; ++r) {
+      for (uint32_t c = 0; c < cols; ++c) {
+        InputPipe::write(q, r * cols + c);
+        std::cout << r * cols + c << ' ';
       }
-      std::cout << "" << std::endl ;
+      std::cout << '\n';
     }
-    std::cout << " \n Après transposition : \n" << std::endl ;
+    std::cout << "\nAprès transposition :\n";
 
-    // Lancement du kernel
-    q.single_task<TransposeKernel>(Transpose{b});
-    q.wait();                                        // *** indispensable ***
+    q.single_task<TransposeKernel>(Transpose{b, rows, cols});
+    q.wait();
 
-    // Vérification rapide --------------------------------------------
     bool ok = true;
-    for (int r = 0; r < kCols; ++r) {                // NEW : lignes de la matrice transposée
-      for (int c = 0; c < kRows; ++c) {              // NEW : colonnes de la matrice transposée
-        // Valeur attendue = c * kCols + r  (inverse des indices)
-        std::cout <<  b[r * kRows + c] << " " ;
-        if (b[r * kRows + c] != c * kCols + r) {     // NEW
+    for (uint32_t r = 0; r < cols; ++r) {
+      for (uint32_t c = 0; c < rows; ++c) {
+        std::cout << b[r * rows + c] << ' ';
+        if (b[r * rows + c] != c * cols + r)
           ok = false;
-        }        
       }
-      std::cout << "" << std::endl ;
+      std::cout << '\n';
     }
 
     std::cout << (ok ? "PASSED" : "FAILED") << '\n';
