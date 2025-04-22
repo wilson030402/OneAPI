@@ -33,12 +33,9 @@ struct Transpose {
         uint32_t, decltype(sycl::ext::oneapi::experimental::properties{
         sycl::ext::intel::experimental::conduit})>
         cols;
-
   
-  //uint32_t rows;
-  //uint32_t cols;
-
   void operator()() const {
+    [[intel::loop_coalesce(2)]]
     for (uint32_t r = 0; r < rows; ++r) {
       for (uint32_t c = 0; c < cols; ++c) {
         int v = InputPipe::read();
