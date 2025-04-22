@@ -14,7 +14,7 @@ using InputPipe =
 
 struct Transpose {
   
-  sycl::ext::oneapi::experimental::annotated_arg<
+    sycl::ext::oneapi::experimental::annotated_arg<
       int*,
       decltype(sycl::ext::oneapi::experimental::properties{
           sycl::ext::intel::experimental::buffer_location<Kbl1>,
@@ -22,17 +22,27 @@ struct Transpose {
           sycl::ext::intel::experimental::latency<0>,
           sycl::ext::intel::experimental::read_write_mode_write,
           sycl::ext::oneapi::experimental::alignment<4>})>
-      out_ptr;
+      out;
+
+    sycl::ext::oneapi::experimental::annotated_arg<
+        uint32_t, decltype(sycl::ext::oneapi::experimental::properties{
+                 sycl::ext::intel::experimental::conduit})>
+                 rows;
+                 
+    sycl::ext::oneapi::experimental::annotated_arg<
+        uint32_t, decltype(sycl::ext::oneapi::experimental::properties{
+        sycl::ext::intel::experimental::conduit})>
+        cols;
 
   
-  uint32_t rows;
-  uint32_t cols;
+  //uint32_t rows;
+  //uint32_t cols;
 
   void operator()() const {
     for (uint32_t r = 0; r < rows; ++r) {
       for (uint32_t c = 0; c < cols; ++c) {
         int v = InputPipe::read();
-        out_ptr[c * rows + r] = v;       // indice [c][r] dans la transposée
+        out[c * rows + r] = v;       // indice [c][r] dans la transposée
       }
     }
   }
@@ -53,8 +63,8 @@ int main() {
               << q.get_device().get_info<sycl::info::device::name>() << '\n';
 
     // Taille de la matricee --- A MODIFIER
-    const uint32_t rows = 2048;    
-    const uint32_t cols = 32;
+    const uint32_t rows = 256;    
+    const uint32_t cols = 128;
     const size_t   elements = rows * cols;
 
     int* b = sycl::malloc_shared<int>(
@@ -64,9 +74,9 @@ int main() {
     for (uint32_t r = 0; r < rows; ++r) {
       for (uint32_t c = 0; c < cols; ++c) {
         InputPipe::write(q, r * cols + c);
-        std::cout << r * cols + c << ' ';
+      //  std::cout << r * cols + c << ' ';
       }
-      std::cout << '\n';
+     // std::cout << '\n';
     }
     std::cout << "\nAprès transposition :\n";
 
@@ -76,11 +86,11 @@ int main() {
     bool ok = true;
     for (uint32_t r = 0; r < cols; ++r) {
       for (uint32_t c = 0; c < rows; ++c) {
-        std::cout << b[r * rows + c] << ' ';
+       // std::cout << b[r * rows + c] << ' ';
         if (b[r * rows + c] != c * cols + r)
           ok = false;
       }
-      std::cout << '\n';
+    //  std::cout << '\n';
     }
 
     std::cout << (ok ? "PASSED" : "FAILED") << '\n';
