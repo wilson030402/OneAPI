@@ -10,51 +10,55 @@ using pipe_props = decltype(sycl::ext::oneapi::experimental::properties(
     sycl::ext::intel::experimental::ready_latency<0>));
 
 using InputPipe =
-    sycl::ext::intel::experimental::pipe<IdPipeA, int, 2048, pipe_props>;
+    sycl::ext::intel::experimental::pipe<IdPipeA, sycl::vec<int,2>, 2048, pipe_props>;
 
-struct Transpose {
-  
-    sycl::ext::oneapi::experimental::annotated_arg<
-      int*,
-      decltype(sycl::ext::oneapi::experimental::properties{
-          sycl::ext::intel::experimental::buffer_location<Kbl1>,
-          sycl::ext::intel::experimental::dwidth<32>,
-          sycl::ext::intel::experimental::latency<0>,
-          sycl::ext::intel::experimental::read_write_mode_write,
-          sycl::ext::oneapi::experimental::alignment<4>})>
-      out;
+    struct Transpose {
 
-    sycl::ext::oneapi::experimental::annotated_arg<
-        uint32_t, decltype(sycl::ext::oneapi::experimental::properties{
-                 sycl::ext::intel::experimental::conduit})>
-                 rows;
-                 
-    sycl::ext::oneapi::experimental::annotated_arg<
-        uint32_t, decltype(sycl::ext::oneapi::experimental::properties{
-        sycl::ext::intel::experimental::conduit})>
-        cols;
-
-  void operator()() const {
-    // Buffer local pour stocker temporairement toute la matrice en row-major
-    int buffer[2048];
-  
-    // 1ère phase : lecture depuis InputPipe et stockage dans le buffer
-    for (uint32_t r = 0; r < rows; ++r) {
-      for (uint32_t c = 0; c < cols; ++c) {
-        buffer[r * cols + c] = InputPipe::read();
+      sycl::ext::oneapi::experimental::annotated_arg<
+          int*,
+          decltype(sycl::ext::oneapi::experimental::properties{
+              sycl::ext::intel::experimental::buffer_location<Kbl1>,
+              sycl::ext::intel::experimental::dwidth<32>,
+              sycl::ext::intel::experimental::latency<0>,
+              sycl::ext::intel::experimental::read_write_mode_write,
+              sycl::ext::oneapi::experimental::alignment<4>})>
+          out;
+    
+      sycl::ext::oneapi::experimental::annotated_arg<
+          uint32_t,
+          decltype(sycl::ext::oneapi::experimental::properties{
+              sycl::ext::intel::experimental::conduit})>
+          rows;
+    
+      sycl::ext::oneapi::experimental::annotated_arg<
+          uint32_t,
+          decltype(sycl::ext::oneapi::experimental::properties{
+              sycl::ext::intel::experimental::conduit})>
+          cols;
+    
+      void operator()() const {
+        // Buffer local (taille = rows*cols éléments, limité ici à 2048)
+        int buffer[2048];
+    
+        // Phase 1 : lecture 2-par-2 depuis le pipe et stockage en row-major
+        for (uint32_t r = 0; r < rows; ++r) {
+          for (uint32_t c = 0; c + 1 < cols; c += 2) {
+            sycl::vec<int, 2> v = InputPipe::read();
+            buffer[r * cols + c]     = v[0];
+            buffer[r * cols + c + 1] = v[1];
+          }
+        }
+    
+        // Phase 2 : écriture transposée (boucles inversées ⟹ accès affine)
+        for (uint32_t c = 0; c < cols; ++c) {      // ← boucle externe
+          for (uint32_t r = 0; r < rows; ++r) {    // ← boucle interne
+            // out[c*rows + r] ≡ T[c][r]
+            out[c * rows + r] = buffer[r * cols + c];
+          }
+        }
       }
-    }
-  
-    // 2ème phase : écriture (transposée) depuis le buffer vers la mémoire out[]
-    //[[intel::loop_coalesce(2)]]
-    for (uint32_t r = 0; r < rows; ++r) {
-      for (uint32_t c = 0; c < cols; ++c) {
-        // out[c * rows + r] correspond à l’élément [c][r] de la transposée
-        out[c * rows + r] = buffer[r * cols + c];
-      }
-    }
-  }
-};
+    };
+    
 
 int main() {
   try {
@@ -79,6 +83,8 @@ int main() {
         elements, q,
         {sycl::ext::intel::experimental::property::usm::buffer_location(Kbl1)});
 
+
+    /*
     for (uint32_t r = 0; r < rows; ++r) {
       for (uint32_t c = 0; c < cols; ++c) {
         InputPipe::write(q, r * cols + c);
@@ -86,6 +92,16 @@ int main() {
       }
      // std::cout << '\n';
     }
+    */
+
+    for (uint32_t r = 0; r < rows; ++r) {
+      for (uint32_t c = 0; c + 1 < cols; c+=2 ) {
+        sycl::vec<int,2> a_vec( r * cols + c, r * cols + c+1);
+        InputPipe::write(q, a_vec);
+        }
+      //std::cout << '\n';
+    }
+
     std::cout << "\nAprès transposition :\n";
 
     q.single_task<TransposeKernel>(Transpose{b, rows, cols});
