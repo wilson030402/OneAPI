@@ -10,7 +10,7 @@ using pipe_props = decltype(sycl::ext::oneapi::experimental::properties(
     sycl::ext::intel::experimental::ready_latency<0>));
 
 using InputPipe =
-    sycl::ext::intel::experimental::pipe<IdPipeA, int, 0, pipe_props>;
+    sycl::ext::intel::experimental::pipe<IdPipeA, int, 2048, pipe_props>;
 
 struct Transpose {
   
@@ -33,12 +33,13 @@ struct Transpose {
         uint32_t, decltype(sycl::ext::oneapi::experimental::properties{
         sycl::ext::intel::experimental::conduit})>
         cols;
-  
+
   void operator()() const {
+  
     [[intel::loop_coalesce(2)]]
     for (uint32_t r = 0; r < rows; ++r) {
       for (uint32_t c = 0; c < cols; ++c) {
-        int v = InputPipe::read();
+        int v = InputPipe::read();      
         out[c * rows + r] = v;       // indice [c][r] dans la transposée
       }
     }
@@ -60,8 +61,8 @@ int main() {
               << q.get_device().get_info<sycl::info::device::name>() << '\n';
 
     // Taille de la matricee --- A MODIFIER
-    const uint32_t rows = 256;    
-    const uint32_t cols = 128;
+    const uint32_t rows = 16;    
+    const uint32_t cols = 16;
     const size_t   elements = rows * cols;
 
     int* b = sycl::malloc_shared<int>(
