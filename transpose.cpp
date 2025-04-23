@@ -35,12 +35,22 @@ struct Transpose {
         cols;
 
   void operator()() const {
+    // Buffer local pour stocker temporairement toute la matrice en row-major
+    int buffer[2048];
   
-    [[intel::loop_coalesce(2)]]
+    // 1ère phase : lecture depuis InputPipe et stockage dans le buffer
     for (uint32_t r = 0; r < rows; ++r) {
       for (uint32_t c = 0; c < cols; ++c) {
-        int v = InputPipe::read();      
-        out[c * rows + r] = v;       // indice [c][r] dans la transposée
+        buffer[r * cols + c] = InputPipe::read();
+      }
+    }
+  
+    // 2ème phase : écriture (transposée) depuis le buffer vers la mémoire out[]
+    //[[intel::loop_coalesce(2)]]
+    for (uint32_t r = 0; r < rows; ++r) {
+      for (uint32_t c = 0; c < cols; ++c) {
+        // out[c * rows + r] correspond à l’élément [c][r] de la transposée
+        out[c * rows + r] = buffer[r * cols + c];
       }
     }
   }
