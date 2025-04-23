@@ -14,46 +14,64 @@ using InputPipe =
 
     struct Transpose {
 
+      // ────────────────────────────────
+      // 1.  Argument mémoire configuré
+      //    • bus        : 512 bits  (= 16 int32)
+    //    • alignement : 64 octets
+    //    • bursts      : jusqu’à 16 battements
+      // ────────────────────────────────
       sycl::ext::oneapi::experimental::annotated_arg<
           int*,
           decltype(sycl::ext::oneapi::experimental::properties{
               sycl::ext::intel::experimental::buffer_location<Kbl1>,
-              sycl::ext::intel::experimental::dwidth<32>,
+              sycl::ext::intel::experimental::dwidth<512>,
+              sycl::ext::intel::experimental::maxburst<16>,
               sycl::ext::intel::experimental::latency<0>,
               sycl::ext::intel::experimental::read_write_mode_write,
-              sycl::ext::oneapi::experimental::alignment<4>})>
+              sycl::ext::oneapi::experimental::alignment<64>})>
           out;
     
+      // dimensions transmises par conduit
       sycl::ext::oneapi::experimental::annotated_arg<
-          uint32_t,
-          decltype(sycl::ext::oneapi::experimental::properties{
-              sycl::ext::intel::experimental::conduit})>
+          uint32_t, decltype(sycl::ext::oneapi::experimental::properties{
+                        sycl::ext::intel::experimental::conduit})>
           rows;
     
       sycl::ext::oneapi::experimental::annotated_arg<
-          uint32_t,
-          decltype(sycl::ext::oneapi::experimental::properties{
-              sycl::ext::intel::experimental::conduit})>
+          uint32_t, decltype(sycl::ext::oneapi::experimental::properties{
+                        sycl::ext::intel::experimental::conduit})>
           cols;
     
+      // ────────────────────────────────
+      //  LSU spécialisé : burst-coalescé
+      // ────────────────────────────────
+      using Burst512LSU = sycl::ext::intel::lsu<
+          sycl::ext::intel::burst_coalesce<true>,      // agrégation en bursts
+          sycl::ext::intel::statically_coalesce<false>>;// on garde l’analyse simple
+          //sycl::ext::intel::experimental::dwidth<512>>;              // bus 512 bits
+      // ---------------------------------------------------------------------------
+    
       void operator()() const {
-        // Buffer local (taille = rows*cols éléments, limité ici à 2048)
+        // Buffer local (≤ 2048 éléments) en row-major
         int buffer[2048];
     
-        // Phase 1 : lecture 2-par-2 depuis le pipe et stockage en row-major
+        // Phase 1 : lecture 2 × int depuis le pipe
         for (uint32_t r = 0; r < rows; ++r) {
           for (uint32_t c = 0; c + 1 < cols; c += 2) {
             sycl::vec<int, 2> v = InputPipe::read();
-            buffer[r * cols + c]     = v[0];
+            buffer[r * cols + c    ] = v[0];
             buffer[r * cols + c + 1] = v[1];
           }
         }
     
-        // Phase 2 : écriture transposée (boucles inversées ⟹ accès affine)
-        for (uint32_t c = 0; c < cols; ++c) {      // ← boucle externe
-          for (uint32_t r = 0; r < rows; ++r) {    // ← boucle interne
-            // out[c*rows + r] ≡ T[c][r]
-            out[c * rows + r] = buffer[r * cols + c];
+        // Phase 2 : écriture transposée — accès contigu ⇒ bursts automatiques
+        for (uint32_t c = 0; c < cols; ++c) {
+          for (uint32_t r = 0; r < rows; ++r) {
+            Burst512LSU::store(
+                sycl::address_space_cast<
+                    sycl::access::address_space::global_space,
+                    sycl::access::decorated::no>(out + (c * rows + r)),
+                buffer[r * cols + c]);
           }
         }
       }
