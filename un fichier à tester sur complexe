@@ -1,0 +1,148 @@
+#include <sycl/ext/intel/fpga_extensions.hpp>
+#include <sycl/sycl.hpp>
+#include "exception_handler.hpp"
+
+constexpr int Kbl1 = 1;
+class TransposeKernel;
+class IdPipeA;
+
+// -----------------------------------------------------------------------------
+// Pipe portant un nombre complexe (re + im) de 64 bits = 2 × float32
+using pipe_props = decltype(sycl::ext::oneapi::experimental::properties(
+    sycl::ext::intel::experimental::ready_latency<0>));
+
+using Complex = sycl::vec<float, 2>;
+
+using InputPipe =
+    sycl::ext::intel::experimental::pipe<IdPipeA, Complex, 2048, pipe_props>;
+
+// -----------------------------------------------------------------------------
+// Kernel : transposition ligne → colonne
+struct Transpose {
+
+  sycl::ext::oneapi::experimental::annotated_arg<
+      float*,
+      decltype(sycl::ext::oneapi::experimental::properties{
+          sycl::ext::intel::experimental::buffer_location<Kbl1>,
+          sycl::ext::intel::experimental::dwidth<512>,
+          //sycl::ext::intel::experimental::maxburst<16>,
+          sycl::ext::intel::experimental::latency<0>,
+          sycl::ext::intel::experimental::read_write_mode_write,
+          sycl::ext::oneapi::experimental::alignment<64>})>
+      out;
+
+  sycl::ext::oneapi::experimental::annotated_arg<
+      uint32_t,
+      decltype(sycl::ext::oneapi::experimental::properties{
+          sycl::ext::intel::experimental::conduit})>
+      rows;
+
+  sycl::ext::oneapi::experimental::annotated_arg<
+      uint32_t,
+      decltype(sycl::ext::oneapi::experimental::properties{
+          sycl::ext::intel::experimental::conduit})>
+      cols;
+
+  using Burst512LSU = sycl::ext::intel::lsu<
+      sycl::ext::intel::burst_coalesce<true>,
+      sycl::ext::intel::statically_coalesce<true>>;
+
+  void operator()() const {
+    float buffer[2 * 2048];               // 2 × profondeur du pipe (toujours 64 kio)
+
+    /* Lecture ligne par ligne ------------------------------------------------ */
+    for (uint32_t r = 0; r < rows; ++r) {
+      for (uint32_t c = 0; c + 1 < cols; c += 2) {
+        Complex z = InputPipe::read();    // (re, im)
+        buffer[r * cols + c    ] = z[0];  // partie réelle
+        buffer[r * cols + c + 1] = z[1];  // partie imaginaire
+      }
+    }
+
+    /* Écriture transposée ---------------------------------------------------- */
+    for (uint32_t c = 0; c < cols; ++c) {
+      for (uint32_t r = 0; r < rows; ++r) {
+        Burst512LSU::store(
+            sycl::address_space_cast<
+                sycl::access::address_space::global_space,
+                sycl::access::decorated::no>(out + (c * rows + r)),
+            buffer[r * cols + c]);
+      }
+    }
+  }
+};
+// -----------------------------------------------------------------------------
+// Programme hôte
+int main() {
+  try {
+#if   FPGA_SIMULATOR
+    auto sel = sycl::ext::intel::fpga_simulator_selector_v;
+#elif FPGA_HARDWARE
+    auto sel = sycl::ext::intel::fpga_selector_v;
+#else
+    auto sel = sycl::ext::intel::fpga_emulator_selector_v;
+#endif
+    sycl::queue q(sel, fpga_tools::exception_handler);
+
+    std::cout << "Device : "
+              << q.get_device().get_info<sycl::info::device::name>() << '\n';
+
+    /* Taille de la matrice --------------------------------------------------- */
+    const uint32_t rows = 16;
+    const uint32_t cols = 16;
+    const size_t   elements = rows * cols;
+
+    /* Allocation USM alignée sur le même bank que le kernel ----------------- */
+    float* b = sycl::malloc_shared<float>(
+        elements, q,
+        {sycl::ext::intel::experimental::property::usm::buffer_location(Kbl1)});
+
+    /* Injection des données dans le pipe (réel = r*cols+c, imaginaire = id+0.5) */
+    for (uint32_t r = 0; r < rows; ++r) {
+      for (uint32_t c = 0; c + 1 < cols; c += 2) {
+        Complex z(float(r * cols + c),     float(r * cols + c + 1));
+        InputPipe::write(q, z);
+      }
+    }
+
+    for (uint32_t r = 0; r < rows; ++r) {
+      for (uint32_t c = 0; c + 1 < cols; c += 2) {
+        Complex z(float(r * cols + c),     float(r * cols + c + 1));
+        std::cout << '('<< z[0] << ',' << z[1] << ") ";
+        InputPipe::write(q, z);
+      }
+      std::cout << ' ' << std::endl ;
+    }
+
+
+    q.single_task<TransposeKernel>(Transpose{b, rows, cols});
+    q.wait();
+
+    /* Vérification ----------------------------------------------------------- */
+    bool ok = true;
+    for (uint32_t r = 0; r < cols; ++r) {
+      for (uint32_t c = 0; c < rows; ++c) {
+        if (b[r * rows + c] != float(c * cols + r))
+          ok = false;
+      }
+    }
+    std::cout << "Après transposé" << std::endl ;
+    for (uint32_t r = 0; r < rows; ++r) {
+      for (uint32_t c = 0; c + 1 < cols; c += 2) {
+        Complex z(float(r * cols + c),     float(r * cols + c + 1));
+        std::cout << '('<< z[0] << ',' << z[1] << ") ";
+        InputPipe::write(q, z);
+      }
+      std::cout << ' ' << std::endl ;;
+    }
+
+    std::cout << (ok ? "PASSED" : "FAILED") << '\n';
+
+    sycl::free(b, q);
+    return ok ? EXIT_SUCCESS : EXIT_FAILURE;
+
+  } catch (const sycl::exception& e) {
+    std::cerr << "SYCL exception : " << e.what() << '\n';
+    return EXIT_FAILURE;
+  }
+}
