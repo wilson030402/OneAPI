@@ -20,12 +20,10 @@ using InputPipe = sycl::ext::intel::experimental::pipe<
 using out_props = decltype(
     sycl::ext::oneapi::experimental::properties{
         sycl::ext::intel::experimental::buffer_location<Kbl1>,
-        sycl::ext::intel::experimental::dwidth<32>,
-        sycl::ext::intel::experimental::maxburst<64>,
+        sycl::ext::intel::experimental::dwidth<512>,
         sycl::ext::intel::experimental::latency<0>,
         sycl::ext::intel::experimental::read_write_mode_write,
-        // un Complex fait 2×32 bits = 64 bits = 8 octets d'alignement
-        sycl::ext::oneapi::experimental::alignment<8>});
+        sycl::ext::oneapi::experimental::alignment<64>});
 
 struct Transpose {
   // out pointe maintenant sur un tableau de Complex
@@ -44,23 +42,31 @@ struct Transpose {
           sycl::ext::intel::experimental::conduit})>
       cols;
 
+using OutputLSU = sycl::ext::intel::lsu< 
+  sycl::ext::intel::burst_coalesce<true>,
+  sycl::ext::intel::statically_coalesce<false>>;
+
+  
   void operator()() const {
     // buffer local de Complex
     Complex buffer[2048];
 
-    // Phase 1 : lecture 2-par-2 depuis le pipe et stockage
+    // Phase 1 : lecture depuis le pipe et stockage
     for (uint32_t r = 0; r < rows; ++r) {
-      for (uint32_t c = 0; c < cols; c ++) {//for (uint32_t c = 0; c + 1 < cols; c += 2) {
+      for (uint32_t c = 0; c < cols; c ++) {
         Complex v = InputPipe::read();
         buffer[r * cols + c]     = v;
-        //buffer[r * cols + c + 1] = InputPipe::read();
       }
     }
-
+    [[intel::ivdep(buffer)]]
     // Phase 2 : écriture transposée
     for (uint32_t c = 0; c < cols; ++c) {
       for (uint32_t r = 0; r < rows; ++r) {
-        out[c * rows + r] = buffer[r * cols + c];
+        //out[c * rows + r] = buffer[r * cols + c];
+        OutputLSU::store( sycl::address_space_cast<
+                          sycl::access::address_space::global_space,
+                          sycl::access::decorated::no> (out + (c * rows + r)),buffer[r * cols + c] );
+
       }
     }
   }
@@ -81,8 +87,8 @@ int main() {
               << q.get_device().get_info<sycl::info::device::name>()
               << '\n';
 
-    const uint32_t rows     = 16;
-    const uint32_t cols     = 16;
+    const uint32_t rows     = 8;
+    const uint32_t cols     = 8;
     const size_t   elements = size_t(rows) * cols;
 
     // Allocation d'un tableau de Complex
@@ -117,7 +123,7 @@ int main() {
         Complex v = b[r * rows + c];
         std::cout << '('
                   << v[0] << ','
-                  << v[1] << ") " << &b[r * rows + c]<<' ';
+                  << v[1] << ") " << &b[r * rows + c]<<' ';  // permet d'afficher l'addresse  &b[r * rows + c]<<' ';
         // On vérifie que la partie réelle est c*cols + r
         // et que l'imaginaire est +0.5
         if (v[0] != float(c * cols + r) || v[1] != float(c * cols + r) + 0.5f)
