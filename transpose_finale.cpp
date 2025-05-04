@@ -14,18 +14,23 @@ using pipe_props = decltype(
 // On passe maintenant à un pipe de sycl::vec<float,2>
 using Complex   = sycl::vec<float,2>;
 using InputPipe = sycl::ext::intel::experimental::pipe<
-    IdPipeA, Complex, 2048, pipe_props>;
+    IdPipeA, Complex, 0, pipe_props>;
 
 // Propriétés pour l'annotation de l'output
 using out_props = decltype(
     sycl::ext::oneapi::experimental::properties{
         sycl::ext::intel::experimental::buffer_location<Kbl1>,
-        sycl::ext::intel::experimental::dwidth<32>,
+        sycl::ext::intel::experimental::dwidth<512>,
         sycl::ext::intel::experimental::maxburst<16>,
         sycl::ext::intel::experimental::latency<0>,
         sycl::ext::intel::experimental::read_write_mode_write,
         // un Complex fait 2×32 bits = 64 bits = 8 octets d'alignement
-        sycl::ext::oneapi::experimental::alignment<8>});
+        sycl::ext::oneapi::experimental::alignment<64>});
+
+using LSU512 = sycl::ext::intel::lsu<
+  sycl::ext::intel::burst_coalesce<true>,      // agrégation en bursts
+  sycl::ext::intel::statically_coalesce<false>>;// on garde l’analyse simple
+
 
 struct Transpose {
   // out pointe maintenant sur un tableau de Complex
@@ -44,39 +49,29 @@ struct Transpose {
           sycl::ext::intel::experimental::conduit})>
       cols;
 
-void lecture (uint32_t rows, uint32_t cols, Complex* buffer ) const {
-  for (uint32_t r = 0; r < rows; ++r) {
-    for (uint32_t c = 0; c < cols; c++) {//for (uint32_t c = 0; c + 1 < cols; c += 2) {
-      Complex v = InputPipe::read();
-      buffer[r * cols + c]     = v;   
-    }
-  }
-}
-
-void ecriture (uint32_t rows, uint32_t cols, Complex* buffer)const{
-  for (uint32_t c = 0; c < cols; ++c) {
-    for (uint32_t r = 0; r < rows; ++r) {
-      out[c * rows + r] = buffer[r * cols + c];
-    }
-  }
-}
 void operator()() const {
-  /* Buffer local : au plus MAX_COLS éléments */
-  Complex line_buf[2048];
-
+    Complex line_buf[2048];
+  [[intel::loop_coalesce(2)]]
   for (uint32_t r = 0; r < rows; ++r) {
 
     /* ---------------- Lecture d’une ligne complète -------------- */
-#pragma unroll
+//#pragma unroll (4)
     for (uint32_t c = 0; c < cols; ++c) {
       line_buf[c] = InputPipe::read();
     }
 
     /* ---------------- Écriture de la colonne r ------------------ */
-#pragma unroll
+//#pragma unroll (16)
     for (uint32_t c = 0; c < cols; ++c) {
       /*  (r,c) dans A  →  (c,r) dans Aᵀ   */
-      out[c * rows + r] = line_buf[c];
+      //out[c * rows + r] = line_buf[c];
+      LSU512::store(
+                sycl::address_space_cast<
+                sycl::access::address_space::global_space,
+                sycl::access::decorated::no>(out + (c * rows + r)),
+                line_buf[c]);
+      //LSU512::store(out + (c * rows + r), line_buf[c]);
+
     }
   }
 }
