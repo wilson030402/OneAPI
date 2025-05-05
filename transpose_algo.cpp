@@ -4,8 +4,8 @@
 
 int main () {
 
-    size_t ligne = 15 ;
-    size_t colonne = 5 ;
+    size_t ligne = 16 ;
+    size_t colonne = 8 ;
     u_int32_t element = ligne * colonne ;
 
     std::queue<int> myFifo ;
@@ -16,12 +16,32 @@ int main () {
     }
 
     int* t1 = new int [element] ; // tableau de sortie
-    
+    int* buffer = new int [element] ;
 
-    /*transposé de matrice
-    Choisir de commenter (2) et decommenter (1) pour afficher  la matrice d'origine
-    Choisir de commenter (1) et decommenter (2) pour faire la transposé
-    */
+    std::cout << "Buffer de transposition:\n" ;
+    for (size_t i = 0 ; i < ligne/2 ; i++){
+        for (size_t j = 0 ; j < colonne ; j++){
+            buffer[j*ligne+i] = myFifo.front() ;         // Transposé (2)   
+            //std::cout << buffer[j*ligne+i] << ' ';  
+            myFifo.pop() ;
+        }
+        //std::cout << "\n" ; 
+    }
+  
+    for (size_t j = 0 ; j < colonne ; j++){
+        for (size_t i = 0 ; i < ligne/2 ; i++){
+            t1[j*ligne+i] = buffer[j*ligne+i] ;
+            std::cout << buffer[j*ligne+i] << ' ' ; 
+        }
+    std::cout << "\n" ;
+    }
+
+    std::cout << "\n\n" ;
+        
+/*      //transposé de matrice
+    //Choisir de commenter (2) et decommenter (1) pour afficher  la matrice d'origine
+    //Choisir de commenter (1) et decommenter (2) pour faire la transposé
+    
     while (!myFifo.empty()){
         for (size_t i = 0 ; i < ligne ; i++){
             for (size_t j = 0 ; j < colonne ; j++){
@@ -34,9 +54,9 @@ int main () {
             }
 //            std::cout << "\n" ;
         }
-    }
+    } 
+ */
   
-
     // lecture de la fifo = lecture du bus Avalon ST
 /*     while (!myFifo.empty()){
         for (size_t i = 0 ; i < ligne ; i++){
@@ -49,12 +69,12 @@ int main () {
     } */
 
     // Affichage de la matrice transposé 
-    for (size_t j = 0 ; j < colonne ; j++){
+     for (size_t j = 0 ; j < colonne ; j++){
         for (size_t i = 0 ; i < ligne ; i++){
             std::cout << t1[j*ligne+i] << ' ' ; 
         }
     std::cout << "\n" ;
-}
+} 
 
 
     delete[] t1 ;
