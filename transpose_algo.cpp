@@ -15,12 +15,13 @@ int main () {
         myFifo.push(i);
     }
 
-    int* t1 = new int [element] ; 
+    int* t1 = new int [element] ; // tableau de sortie
 
+    //transposé de matrice
     while (!myFifo.empty()){
         for (size_t i = 0 ; i < ligne ; i++){
             for (size_t j = 0 ; j < colonne ; j++){
-                t1[i*ligne+j] = myFifo.front() ;
+                t1[j*ligne+i] = myFifo.front() ;
                 myFifo.pop() ;
             }
         }
