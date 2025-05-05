@@ -4,8 +4,8 @@
 
 int main () {
 
-    size_t ligne = 3 ;
-    size_t colonne = 5  ;
+    size_t ligne = 8 ;
+    size_t colonne = 8 ;
     u_int32_t element = ligne * colonne ;
 
     std::queue<int> myFifo ;
@@ -15,7 +15,18 @@ int main () {
         myFifo.push(i);
     }
 
-    // lecture de la fifo = lecture du bus Avalon ST
+    int* t1 = new int [element] ; 
+
+    while (!myFifo.empty()){
+        for (size_t i = 0 ; i < ligne ; i++){
+            for (size_t j = 0 ; j < colonne ; j++){
+                t1[i*ligne+j] = myFifo.front() ;
+                myFifo.pop() ;
+            }
+        }
+    }
+
+/*     // lecture de la fifo = lecture du bus Avalon ST
     while (!myFifo.empty()){
         for (size_t i = 0 ; i < ligne ; i++){
             for (size_t i = 0 ; i < colonne ; i++){
@@ -25,9 +36,16 @@ int main () {
             std::cout << "\n" ;
         }
     }
+ */
+
+    for (size_t i = 0 ; i < ligne ; i++){
+        for (size_t j = 0 ; j < colonne ; j++){
+            std::cout << t1[i*ligne+j] << ' ' ; 
+        }
+    std::cout << "\n" ;
+}
 
 
-
-    //delete[] t1 ;
+    delete[] t1 ;
     return 0 ;
 }
