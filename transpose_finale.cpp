@@ -21,7 +21,7 @@ using out_props = decltype(
     sycl::ext::oneapi::experimental::properties{
         sycl::ext::intel::experimental::buffer_location<Kbl1>,
         sycl::ext::intel::experimental::dwidth<512>,
-        sycl::ext::intel::experimental::maxburst<16>,
+        sycl::ext::intel::experimental::maxburst<4>,
         sycl::ext::intel::experimental::latency<0>,
         sycl::ext::intel::experimental::read_write_mode_write,
         // un Complex fait 2×32 bits = 64 bits = 8 octets d'alignement
@@ -29,8 +29,7 @@ using out_props = decltype(
 
 using LSU512 = sycl::ext::intel::lsu<
   sycl::ext::intel::burst_coalesce<true>,      // agrégation en bursts
-  sycl::ext::intel::statically_coalesce<false>>;// on garde l’analyse simple
-
+  sycl::ext::intel::statically_coalesce<true>>;// on garde l’analyse simple
 
 struct Transpose {
   // out pointe maintenant sur un tableau de Complex
@@ -42,39 +41,44 @@ struct Transpose {
       uint32_t,
       decltype(sycl::ext::oneapi::experimental::properties{
           sycl::ext::intel::experimental::conduit})>
-      rows;
+      rows; // ligne
   sycl::ext::oneapi::experimental::annotated_arg<
       uint32_t,
       decltype(sycl::ext::oneapi::experimental::properties{
           sycl::ext::intel::experimental::conduit})>
-      cols;
+      cols; // colonne
 
-void operator()() const {
-    Complex line_buf[2048];
-  [[intel::loop_coalesce(2)]]
-  for (uint32_t r = 0; r < rows; ++r) {
+  void operator()() const {
+    // buffer local de Complex
 
-    /* ---------------- Lecture d’une ligne complète -------------- */
-//#pragma unroll (4)
-    for (uint32_t c = 0; c < cols; ++c) {
-      line_buf[c] = InputPipe::read();
-    }
+    //[[intel::max_replicates(1)]]
+    Complex buffer[32*2048];
 
-    /* ---------------- Écriture de la colonne r ------------------ */
-//#pragma unroll (16)
-    for (uint32_t c = 0; c < cols; ++c) {
-      /*  (r,c) dans A  →  (c,r) dans Aᵀ   */
-      //out[c * rows + r] = line_buf[c];
-      LSU512::store(
-                sycl::address_space_cast<
-                sycl::access::address_space::global_space,
-                sycl::access::decorated::no>(out + (c * rows + r)),
-                line_buf[c]);
-      //LSU512::store(out + (c * rows + r), line_buf[c]);
+    size_t ligne = rows ;
+    size_t colonne = cols ; // ça sera 2048 au max , ça changera pas
 
-    }
-  }
-}
+    size_t nbCols = 32 ;   // Je veux faire les itérations 32 par 32 
+    size_t nbPass = ligne / nbCols;
+
+    for (size_t a = 0 ; a < nbPass ; a++ ){
+      [[intel::loop_coalesce(2)]]
+      for (size_t i = 0 ; i < nbCols; i++){
+         for (size_t j = 0 ; j < colonne ; j++){
+             buffer[i * colonne + j] = InputPipe::read()  ;         // Transposé (2)    
+         }
+     }
+     [[intel::loop_coalesce(2),intel::ivdep]]
+     for (size_t j = 0 ; j < colonne ; j++){
+         #pragma unroll (8)
+         for (size_t i = 0 ; i < nbCols ; i++){
+             //out[j*ligne+i + (nbCols *a)] = buffer[j*ligne+i] ;
+             LSU512::store( sycl::address_space_cast<
+                            sycl::access::address_space::global_space,
+                            sycl::access::decorated::no>(out + j*ligne+i + (nbCols *a)), buffer[i * colonne + j]);
+         }
+      } 
+    }  
+  }  
 };
 
 int main() {
@@ -107,12 +111,12 @@ int main() {
         // On simule un complexe (re, im = .5)
         Complex a_vec(float(r * cols + c),
                       float(r * cols + c) + 0.5f);
-        std::cout << '('
+        /* std::cout << '('
                   << a_vec[0] << ','
-                  << a_vec[1] << ") ";
+                  << a_vec[1] << ") "; */
         InputPipe::write(q, a_vec);
       }
-      std::cout << '\n';
+      //std::cout << '\n';
     }
 
     std::cout << "\nAprès transposition :\n";
@@ -126,15 +130,15 @@ int main() {
     for (uint32_t r = 0; r < cols; ++r) {
       for (uint32_t c = 0; c < rows; ++c) {
         Complex v = b[r * rows + c];
-        std::cout << '('
+        /* std::cout << '('
                   << v[0] << ','
-                  << v[1] << ") " ;// << &b[r * rows + c]<<' ';
+                  << v[1] << ") " ;//<< &b[r * rows + c]<<' '; */
         // On vérifie que la partie réelle est c*cols + r
         // et que l'imaginaire est +0.5
         if (v[0] != float(c * cols + r) || v[1] != float(c * cols + r) + 0.5f)
           ok = false;
       }
-      std::cout << '\n';
+      //std::cout << '\n';
     }
 
     std::cout << (ok ? "PASSED\n" : "FAILED\n");
