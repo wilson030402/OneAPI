@@ -4,13 +4,13 @@
 
 int main () {
 
-    size_t ligne = 128 ;
-    size_t colonne = 32 ; // ça sera 2048, ça changera pas
+    size_t ligne = 2048 ;
+    size_t colonne = 2048 ; // ça sera 2048, ça changera pas
     u_int32_t element = ligne * colonne ;
     
     // Je veux faire les itérations 8 par 8 
 
-    size_t nbCols = 8 ;
+    size_t nbCols = 32 ;
     size_t nbPass = ligne / nbCols;
     
     std::queue<int> myFifo ;
@@ -19,7 +19,7 @@ int main () {
         myFifo.push(i);
     }
     int* t1 = new int [element] ; // tableau de sortie
-    int* buffer = new int [element] ;
+    int* buffer = new int [2048*32] ;
     
      for (size_t a = 0 ; a < nbPass ; a++ ){
          std::cout << "Buffer de transposition: "<< a + 1 << "\n" ;
@@ -51,5 +51,6 @@ int main () {
 
 
     delete[] t1 ;
+    delete[] buffer ;
     return 0 ;
 }
