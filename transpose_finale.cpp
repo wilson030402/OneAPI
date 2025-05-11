@@ -2,84 +2,118 @@
 #include <sycl/sycl.hpp>
 #include "exception_handler.hpp"
 
-constexpr int Kbl1 = 1;
-class TransposeKernel;
-class IdPipeA;
+// ---------------------------------------------------------------------------
+//  Paramètres généraux
+// ---------------------------------------------------------------------------
+constexpr int  kBufferLoc   = 1;      // ID de la banque mémoire externe
+constexpr auto kMaxCols     = 2048;   // valeur max pour 'cols'
+constexpr auto kTileRows    = 32;     // hauteur d’une tuile
+constexpr auto kPipeDepth   = kTileRows * kMaxCols;   // 65 536 éléments
+using Complex  = sycl::vec<float, 2>;
 
-// Propriétés du pipe inchangées
-using pipe_props = decltype(
-    sycl::ext::oneapi::experimental::properties(
-        sycl::ext::intel::experimental::ready_latency<0>));
+// ---------------------------------------------------------------------------
+//  Pipes
+// ---------------------------------------------------------------------------
+class InTag;
+using InPipe = sycl::ext::intel::experimental::pipe<
+    InTag, Complex, 0,
+    decltype(sycl::ext::oneapi::experimental::properties(
+        sycl::ext::intel::experimental::ready_latency<0>))>;
 
-// On passe maintenant à un pipe de sycl::vec<float,2>
-using Complex   = sycl::vec<float,2>;
-using InputPipe = sycl::ext::intel::experimental::pipe<
-    IdPipeA, Complex, 0, pipe_props>;
+class TileTag;
+using TilePipe = sycl::ext::intel::experimental::pipe<
+    TileTag, Complex, kPipeDepth>;               // FIFO de 65 536 entrées
 
-// Propriétés pour l'annotation de l'output
-using out_props = decltype(
+// ---------------------------------------------------------------------------
+//  LSU & propriétés de sortie
+// ---------------------------------------------------------------------------
+using OutProps = decltype(
     sycl::ext::oneapi::experimental::properties{
-        sycl::ext::intel::experimental::buffer_location<Kbl1>,
-        sycl::ext::intel::experimental::dwidth<512>,
+        sycl::ext::intel::experimental::buffer_location<kBufferLoc>,
+        sycl::ext::intel::experimental::dwidth<256>,
         sycl::ext::intel::experimental::maxburst<4>,
         sycl::ext::intel::experimental::latency<0>,
         sycl::ext::intel::experimental::read_write_mode_write,
-        // un Complex fait 2×32 bits = 64 bits = 8 octets d'alignement
-        sycl::ext::oneapi::experimental::alignment<64>});
+        sycl::ext::oneapi::experimental::alignment<32>});
 
 using LSU512 = sycl::ext::intel::lsu<
-  sycl::ext::intel::burst_coalesce<true>,      // agrégation en bursts
-  sycl::ext::intel::statically_coalesce<true>>;// on garde l’analyse simple
+    sycl::ext::intel::burst_coalesce<true>,
+    sycl::ext::intel::statically_coalesce<true>>;
 
-struct Transpose {
-  // out pointe maintenant sur un tableau de Complex
-  sycl::ext::oneapi::experimental::annotated_arg<
-      Complex*,
-      out_props>
-      out;
-  sycl::ext::oneapi::experimental::annotated_arg<
-      uint32_t,
-      decltype(sycl::ext::oneapi::experimental::properties{
-          sycl::ext::intel::experimental::conduit})>
-      rows; // ligne
-  sycl::ext::oneapi::experimental::annotated_arg<
-      uint32_t,
-      decltype(sycl::ext::oneapi::experimental::properties{
-          sycl::ext::intel::experimental::conduit})>
-      cols; // colonne
+// ---------------------------------------------------------------------------
+//  Kernel 1 : Loader – lit InPipe et remplit TilePipe (II = 1)
+// ---------------------------------------------------------------------------
+struct Loader {
+  uint32_t rows;
+  uint32_t cols;   // ≤ kMaxCols
 
+  [[intel::kernel_args_restrict]]
   void operator()() const {
-    // buffer local de Complex
+    const uint32_t nbTiles = rows / kTileRows;
 
-    //[[intel::max_replicates(1)]]
-    Complex buffer[32*2048];
-
-    size_t ligne = rows ;
-    size_t colonne = cols ; // ça sera 2048 au max , ça changera pas
-
-    size_t nbCols = 32 ;   // Je veux faire les itérations 32 par 32 
-    size_t nbPass = ligne / nbCols;
-
-    for (size_t a = 0 ; a < nbPass ; a++ ){
-      [[intel::loop_coalesce(2)]]
-      for (size_t i = 0 ; i < nbCols; i++){
-         for (size_t j = 0 ; j < colonne ; j++){
-             buffer[i * colonne + j] = InputPipe::read()  ;         // Transposé (2)    
-         }
-     }
-     [[intel::loop_coalesce(2),intel::ivdep]]
-     for (size_t j = 0 ; j < colonne ; j++){
-         #pragma unroll (8)
-         for (size_t i = 0 ; i < nbCols ; i++){
-             //out[j*ligne+i + (nbCols *a)] = buffer[j*ligne+i] ;
-             LSU512::store( sycl::address_space_cast<
-                            sycl::access::address_space::global_space,
-                            sycl::access::decorated::no>(out + j*ligne+i + (nbCols *a)), buffer[i * colonne + j]);
-         }
-      } 
-    }  
-  }  
+    for (uint32_t t = 0; t < nbTiles; ++t) {
+      for (uint32_t i = 0; i < kTileRows; ++i)
+        for (uint32_t j = 0; j < cols; ++j)
+          TilePipe::write(InPipe::read());
+    }
+  }
 };
+
+// ---------------------------------------------------------------------------
+//  Helpers pour Storer
+// ---------------------------------------------------------------------------
+template<typename Buf>
+void read_tile(Buf buf, uint32_t cols) {
+  for (uint32_t i = 0; i < kTileRows; ++i)
+    for (uint32_t j = 0; j < cols; ++j)
+      buf[i * cols + j] = TilePipe::read();
+}
+
+template<typename Buf>
+void write_tile(Buf buf,
+                uint32_t pass, uint32_t cols, uint32_t rows,
+                Complex *out) {
+  for (uint32_t j = 0; j < cols; ++j) {
+#pragma unroll(8)                         // 8 × 64 bit = 512 bit
+    for (uint32_t i = 0; i < kTileRows; ++i) {
+      size_t dst = size_t(j) * rows + pass * kTileRows + i;
+      LSU512::store(
+          sycl::address_space_cast<
+              sycl::access::address_space::global_space,
+              sycl::access::decorated::no>(out + dst),
+          buf[i * cols + j]);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+//  Kernel 2 : Storer – double-buffer, bursts de 4
+// ---------------------------------------------------------------------------
+struct Storer {
+  sycl::ext::oneapi::experimental::annotated_arg<Complex*, OutProps> out;
+  uint32_t rows;
+  uint32_t cols;      // ≤ kMaxCols
+
+  [[intel::kernel_args_restrict]]
+  void operator()() const {
+    [[intel::max_replicates(1)]] Complex bufA[kTileRows * kMaxCols];
+    [[intel::max_replicates(1)]]Complex bufB[kTileRows * kMaxCols];
+
+    const uint32_t nbTiles = rows / kTileRows;
+
+    for (uint32_t t = 0; t < nbTiles + 1; ++t) {
+      Complex *rdBuf = (t & 1) ? bufB : bufA;
+      Complex *wrBuf = (t & 1) ? bufA : bufB;
+
+      // Lecture de la tuile t
+      if (t < nbTiles) read_tile(rdBuf, cols);
+
+      // Écriture de la tuile t-1
+      if (t > 0) write_tile(wrBuf, t - 1, cols, rows, out);
+    }
+  }
+};
+
 
 int main() {
   try {
@@ -92,61 +126,42 @@ int main() {
 #endif
     sycl::queue q(sel, fpga_tools::exception_handler);
 
-    std::cout << "Device : "
-              << q.get_device().get_info<sycl::info::device::name>()
-              << '\n';
+    constexpr uint32_t rows = 64;
+    constexpr uint32_t cols = 64;
+    const     size_t   elements = size_t(rows) * cols;
 
-    const uint32_t rows     = 256;
-    const uint32_t cols     = 256;
-    const size_t   elements = size_t(rows) * cols;
-
-    // Allocation d'un tableau de Complex
-    Complex* b = sycl::malloc_shared<Complex>(
+    // Allocation du tableau résultat en DDR
+    Complex *matrixT = sycl::malloc_shared<Complex>(
         elements, q,
-        {sycl::ext::intel::experimental::property::usm::buffer_location(Kbl1)});
+        {sycl::ext::intel::experimental::property::usm::buffer_location(
+            kBufferLoc)});
 
-    // Génération et écriture dans le pipe
-    for (uint32_t r = 0; r < rows; ++r) {
-      for (uint32_t c = 0; c < cols; ++c) {
-        // On simule un complexe (re, im = .5)
-        Complex a_vec(float(r * cols + c),
-                      float(r * cols + c) + 0.5f);
-        /* std::cout << '('
-                  << a_vec[0] << ','
-                  << a_vec[1] << ") "; */
-        InputPipe::write(q, a_vec);
-      }
-      //std::cout << '\n';
-    }
+    // Remplit le pipe d’entrée
+    for (uint32_t r = 0; r < rows; ++r)
+      for (uint32_t c = 0; c < cols; ++c)
+        InPipe::write(q, Complex(float(r * cols + c),
+                                 float(r * cols + c) + 0.5f));
 
-    std::cout << "\nAprès transposition :\n";
-
-    // Lancement du kernel
-    q.single_task<TransposeKernel>(Transpose{b, rows, cols});
+    // Lancement des deux kernels
+    q.single_task<struct LoaderK>(Loader{rows, cols});
+    q.single_task<struct StorerK>(Storer{matrixT, rows, cols});
     q.wait();
 
-    // Affichage et vérification
+    // Vérification rapide
     bool ok = true;
-    for (uint32_t r = 0; r < cols; ++r) {
+    for (uint32_t r = 0; r < cols; ++r)
       for (uint32_t c = 0; c < rows; ++c) {
-        Complex v = b[r * rows + c];
-        /* std::cout << '('
-                  << v[0] << ','
-                  << v[1] << ") " ;//<< &b[r * rows + c]<<' '; */
-        // On vérifie que la partie réelle est c*cols + r
-        // et que l'imaginaire est +0.5
-        if (v[0] != float(c * cols + r) || v[1] != float(c * cols + r) + 0.5f)
-          ok = false;
+        Complex v = matrixT[r * rows + c];
+        if (v[0] != float(c * cols + r) ||
+            v[1] != float(c * cols + r) + 0.5f) ok = false;
       }
-      //std::cout << '\n';
-    }
 
     std::cout << (ok ? "PASSED\n" : "FAILED\n");
-
-    sycl::free(b, q);
+    sycl::free(matrixT, q);
     return ok ? EXIT_SUCCESS : EXIT_FAILURE;
-  } catch (const sycl::exception& e) {
-    std::cerr << "SYCL exception : " << e.what() << '\n';
+
+  } catch (const sycl::exception &e) {
+    std::cerr << "SYCL exception: " << e.what() << '\n';
     return EXIT_FAILURE;
   }
 }
