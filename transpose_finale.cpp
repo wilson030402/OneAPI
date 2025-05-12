@@ -20,9 +20,12 @@ using InPipe = sycl::ext::intel::experimental::pipe<
     decltype(sycl::ext::oneapi::experimental::properties(
         sycl::ext::intel::experimental::ready_latency<0>))>;
 
-class TileTag;
-using TilePipe = sycl::ext::intel::experimental::pipe<
-    TileTag, Complex, kPipeDepth>;               // FIFO de 65 536 entrées
+class TilePingTag;
+class TilePongTag;
+        
+using TilePingPipe = sycl::ext::intel::experimental::pipe<TilePingTag, Complex, 0>;
+using TilePongPipe = sycl::ext::intel::experimental::pipe<TilePongTag, Complex, 0>;
+                   // FIFO de 65 536 entrées
 
 // ---------------------------------------------------------------------------
 //  LSU & propriétés de sortie
@@ -50,29 +53,30 @@ struct Loader {
   [[intel::kernel_args_restrict]]
   void operator()() const {
     const uint32_t nbTiles = rows / kTileRows;
+    bool use_pong = false;              // false → Ping, true → Pong
 
     for (uint32_t t = 0; t < nbTiles; ++t) {
       for (uint32_t i = 0; i < kTileRows; ++i)
-        for (uint32_t j = 0; j < cols; ++j)
-          TilePipe::write(InPipe::read());
+        for (uint32_t j = 0; j < cols; ++j) {
+          Complex v = InPipe::read();
+          if (use_pong)
+            TilePongPipe::write(v);
+          else
+            TilePingPipe::write(v);
+        }
+      use_pong = !use_pong;             // alterne à chaque tuile
     }
   }
 };
 
 // ---------------------------------------------------------------------------
-//  Helpers pour Storer
+//  Kernel 2 : Storer – double-buffer, bursts de 4
 // ---------------------------------------------------------------------------
-template<typename Buf>
-void read_tile(Buf buf, uint32_t cols) {
-  for (uint32_t i = 0; i < kTileRows; ++i)
-    for (uint32_t j = 0; j < cols; ++j)
-      buf[i * cols + j] = TilePipe::read();
-}
 
-template<typename Buf>
-void write_tile(Buf buf,
-                uint32_t pass, uint32_t cols, uint32_t rows,
-                Complex *out) {
+template <typename BufPtr>
+inline void write_tile(BufPtr buf,
+                       uint32_t pass, uint32_t cols, uint32_t rows,
+                       Complex *out) {
   for (uint32_t j = 0; j < cols; ++j) {
 #pragma unroll(8)                         // 8 × 64 bit = 512 bit
     for (uint32_t i = 0; i < kTileRows; ++i) {
@@ -86,33 +90,47 @@ void write_tile(Buf buf,
   }
 }
 
-// ---------------------------------------------------------------------------
-//  Kernel 2 : Storer – double-buffer, bursts de 4
-// ---------------------------------------------------------------------------
 struct Storer {
   sycl::ext::oneapi::experimental::annotated_arg<Complex*, OutProps> out;
   uint32_t rows;
-  uint32_t cols;      // ≤ kMaxCols
+  uint32_t cols;
 
   [[intel::kernel_args_restrict]]
   void operator()() const {
+    // deux buffers locaux → un pour lire, un pour écrire
     [[intel::max_replicates(1)]] Complex bufA[kTileRows * kMaxCols];
-    [[intel::max_replicates(1)]]Complex bufB[kTileRows * kMaxCols];
+    [[intel::max_replicates(1)]] Complex bufB[kTileRows * kMaxCols];
 
     const uint32_t nbTiles = rows / kTileRows;
+    bool read_from_pong = false;        // false → Ping, true → Pong
 
     for (uint32_t t = 0; t < nbTiles + 1; ++t) {
-      Complex *rdBuf = (t & 1) ? bufB : bufA;
-      Complex *wrBuf = (t & 1) ? bufA : bufB;
+      Complex *rdBuf = read_from_pong ? bufB : bufA;
+      Complex *wrBuf = read_from_pong ? bufA : bufB;
 
-      // Lecture de la tuile t
-      if (t < nbTiles) read_tile(rdBuf, cols);
+      // (1) Lire la tuile t dans rdBuf
+      if (t < nbTiles) {
+        if (read_from_pong) {
+          for (uint32_t i = 0; i < kTileRows; ++i)
+            for (uint32_t j = 0; j < cols; ++j)
+              rdBuf[i * cols + j] = TilePongPipe::read();
+        } else {
+          for (uint32_t i = 0; i < kTileRows; ++i)
+            for (uint32_t j = 0; j < cols; ++j)
+              rdBuf[i * cols + j] = TilePingPipe::read();
+        }
+      }
+      
 
-      // Écriture de la tuile t-1
-      if (t > 0) write_tile(wrBuf, t - 1, cols, rows, out);
+      // (2) Écrire la tuile t-1 depuis wrBuf
+      if (t > 0)
+        write_tile(wrBuf, t - 1, cols, rows, out);
+
+      read_from_pong = !read_from_pong; // alterne à chaque tuile
     }
   }
 };
+
 
 
 int main() {
@@ -126,8 +144,8 @@ int main() {
 #endif
     sycl::queue q(sel, fpga_tools::exception_handler);
 
-    constexpr uint32_t rows = 64;
-    constexpr uint32_t cols = 64;
+    constexpr uint32_t rows = 256;
+    constexpr uint32_t cols = 256;
     const     size_t   elements = size_t(rows) * cols;
 
     // Allocation du tableau résultat en DDR
