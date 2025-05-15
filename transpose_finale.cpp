@@ -55,7 +55,7 @@ struct Transpose {
     void operator()() const {
 
       // pragma unroll sur l'écriture doit avoir le même N que N réplication du buffer
-     [[intel::numbanks(16),intel::bankwidth(64),intel::max_replicates(1)]] Complex buffer[2][2048][32];
+     [[intel::numbanks(2),intel::max_replicates(1)]] Complex buffer[2][2048][32];
 
     [[intel::fpga_register]]   size_t ligne = rows ;
     [[intel::fpga_register]] size_t colonne = cols ; // ça sera 2048 au max , ça changera pas
@@ -63,9 +63,9 @@ struct Transpose {
     [[intel::fpga_register]] size_t nbCols = 32 ;   // Je veux faire les itérations 32 par 32 
     [[intel::fpga_register]] size_t nbPass = ligne / nbCols;
 
-    [[intel::initiation_interval(1),intel::ivdep(buffer)]]
+    [[intel::initiation_interval(1),intel::ivdep(buffer),intel::speculated_iterations(5)]]
     for (size_t a = 0 ; a < nbPass ; a++ ){
-      [[intel::loop_coalesce(2)]]
+      [[intel::loop_coalesce(2),intel::speculated_iterations(2)]]
       for (size_t i = 0 ; i < nbCols; i++){
          for (size_t j = 0 ; j < colonne ; j++){
              buffer[a%2][j][i] = InputPipe::read()  ;         // Transposé (2)    
@@ -100,8 +100,8 @@ int main() {
               << q.get_device().get_info<sycl::info::device::name>()
               << '\n';
 
-    const uint32_t rows     = 128;
-    const uint32_t cols     = 128;
+    const uint32_t rows     = 256;
+    const uint32_t cols     = 256;
     const size_t   elements = size_t(rows) * cols;
 
     // Allocation d'un tableau de Complex
