@@ -65,7 +65,7 @@ struct Transpose {
 
     [[intel::initiation_interval(1),intel::ivdep(buffer),intel::speculated_iterations(5)]]
     for (size_t a = 0 ; a < nbPass ; a++ ){
-      [[intel::loop_coalesce(2),intel::speculated_iterations(2)]]
+      [[intel::loop_coalesce(2),intel::initiation_interval(1)]] //
       for (size_t i = 0 ; i < nbCols; i++){
          for (size_t j = 0 ; j < colonne ; j++){
              buffer[a%2][j][i] = InputPipe::read()  ;         // Transposé (2)    
@@ -100,8 +100,8 @@ int main() {
               << q.get_device().get_info<sycl::info::device::name>()
               << '\n';
 
-    const uint32_t rows     = 256;
-    const uint32_t cols     = 256;
+    const uint32_t rows     = 128;
+    const uint32_t cols     = 128;
     const size_t   elements = size_t(rows) * cols;
 
     // Allocation d'un tableau de Complex
