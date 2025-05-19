@@ -81,11 +81,13 @@ struct Transpose {
       size_t nbPassH = colonne / tTuile ;
       size_t nbPassV = ligne / tTuile ;
 
+      
       for (size_t a = 0 ; a < nbPassV  ; a++ ) {
         for (size_t b = 0 ; b < nbPassH ; b++ ) {
           
           [[intel::loop_coalesce(2)]]
           for (size_t i = 0; i < tTuile; i++) {
+            #pragma unroll
             for (size_t j = 0; j < tTuile; j++) {
               size_t r = a * tTuile + i;
               size_t c = b * tTuile + j;
@@ -95,14 +97,12 @@ struct Transpose {
           
           [[intel::loop_coalesce(2)]]
           for (size_t i = 0; i < tTuile; i++) {
-            #pragma unroll (8)
             for (size_t j = 0; j < tTuile; j++) {
               //size_t r = b * tTuile + i;
               //size_t c = a * tTuile + j;
               LSU512::store( sycl::address_space_cast<
                 sycl::access::address_space::global_space,
                 sycl::access::decorated::no>(&out[(b * tTuile + i) * ligne + (a * tTuile + j)]), buffer[j][i]);
-
               //out[r * ligne + c] = buffer[j][i];
             }
           }
@@ -128,8 +128,8 @@ int main() {
               << q.get_device().get_info<sycl::info::device::name>()
               << '\n';
 
-    const uint32_t rows     = 32;
-    const uint32_t cols     = 32;
+    const uint32_t rows     = 64 ;
+    const uint32_t cols     = 64 ;
     const size_t   elements = size_t(rows) * cols;
 
     // Allocation des tableaux de Complex
