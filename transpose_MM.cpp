@@ -26,23 +26,23 @@ using Complex   = ac_complex<float>;
 using in_props = decltype(
   sycl::ext::oneapi::experimental::properties{
       sycl::ext::intel::experimental::buffer_location<Kbl1>,
-      sycl::ext::intel::experimental::dwidth<64>, //512
-      //sycl::ext::intel::experimental::maxburst<8>, // 4
+      sycl::ext::intel::experimental::dwidth<512>, //512
+      sycl::ext::intel::experimental::maxburst<4>, // 4
       sycl::ext::intel::experimental::latency<0>,
       sycl::ext::intel::experimental::read_write_mode_read,
       // un Complex fait 2×32 bits = 64 bits = 8 octets d'alignement
-      sycl::ext::oneapi::experimental::alignment<8>}); //64
+      sycl::ext::oneapi::experimental::alignment<64>}); //64
 
 // Propriétés pour l'annotation de l'output
 using out_props = decltype(
     sycl::ext::oneapi::experimental::properties{
         sycl::ext::intel::experimental::buffer_location<Kbl2>,
-        sycl::ext::intel::experimental::dwidth<64>, //512
-        //sycl::ext::intel::experimental::maxburst<8>, // 4
+        sycl::ext::intel::experimental::dwidth<512>, //512
+        sycl::ext::intel::experimental::maxburst<4>, // 4
         sycl::ext::intel::experimental::latency<0>,
         sycl::ext::intel::experimental::read_write_mode_write,
         // un Complex fait 2×32 bits = 64 bits = 8 octets d'alignement
-        sycl::ext::oneapi::experimental::alignment<8>}); //64
+        sycl::ext::oneapi::experimental::alignment<64>}); //64
 
 using LSU512 = sycl::ext::intel::lsu<
   sycl::ext::intel::burst_coalesce<true>,      // agrégation en bursts
@@ -83,7 +83,8 @@ struct Transpose {
 
       for (size_t a = 0 ; a < nbPassV  ; a++ ) {
         for (size_t b = 0 ; b < nbPassH ; b++ ) {
-            
+          
+          [[intel::loop_coalesce(2)]]
           for (size_t i = 0; i < tTuile; i++) {
             for (size_t j = 0; j < tTuile; j++) {
               size_t r = a * tTuile + i;
@@ -92,12 +93,17 @@ struct Transpose {
             }
           }
           
-          // écriture transposée dans out
+          [[intel::loop_coalesce(2)]]
           for (size_t i = 0; i < tTuile; i++) {
+            #pragma unroll (8)
             for (size_t j = 0; j < tTuile; j++) {
-              size_t r = b * tTuile + i;
-              size_t c = a * tTuile + j;
-              out[r * ligne + c] = buffer[j][i];
+              //size_t r = b * tTuile + i;
+              //size_t c = a * tTuile + j;
+              LSU512::store( sycl::address_space_cast<
+                sycl::access::address_space::global_space,
+                sycl::access::decorated::no>(&out[(b * tTuile + i) * ligne + (a * tTuile + j)]), buffer[j][i]);
+
+              //out[r * ligne + c] = buffer[j][i];
             }
           }
         }
