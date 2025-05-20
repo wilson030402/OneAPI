@@ -48,6 +48,11 @@ using LSU512 = sycl::ext::intel::lsu<
   sycl::ext::intel::burst_coalesce<true>,      // agrégation en bursts
   sycl::ext::intel::statically_coalesce<true>>;// on garde l’analyse simple
 
+using LoadLSU = sycl::ext::intel::lsu<
+    sycl::ext::intel::burst_coalesce<true>,          // FIFO + precharge des bursts
+    sycl::ext::intel::statically_coalesce<true>// garde le regroupement à 512 b
+>;
+
 struct Transpose {
 // in pointe maintenant sur un tableau de Complex
   sycl::ext::oneapi::experimental::annotated_arg<
@@ -73,7 +78,7 @@ struct Transpose {
     [[intel::kernel_args_restrict]]
     void operator()() const {
 
-      Complex buffer[32][32];
+      [[intel::max_replicates(1)]]Complex buffer[4][32][32];
 
       [[intel::fpga_register]]   size_t ligne = rows ;
       [[intel::fpga_register]] size_t colonne = cols ; // ça sera 2048 au max , ça changera pas
@@ -81,32 +86,46 @@ struct Transpose {
       size_t nbPassH = colonne / tTuile ;
       size_t nbPassV = ligne / tTuile ;
 
-      
+      int toto = 0 ;
+
+      [[intel::loop_coalesce(2),intel::ivdep(buffer)]]
       for (size_t a = 0 ; a < nbPassV  ; a++ ) {
+        [[intel::ivdep(buffer)]]
         for (size_t b = 0 ; b < nbPassH ; b++ ) {
+
+          toto++;
           
           [[intel::loop_coalesce(2)]]
           for (size_t i = 0; i < tTuile; i++) {
-            #pragma unroll
+            #pragma unroll 
             for (size_t j = 0; j < tTuile; j++) {
               size_t r = a * tTuile + i;
               size_t c = b * tTuile + j;
-              buffer[i][j] = in[r * colonne + c];
+              
+              auto gptr = sycl::address_space_cast<
+              sycl::access::address_space::global_space,
+              sycl::access::decorated::no>(&in[r*colonne + c]);
+              buffer[ toto % 4 ][i][j] = LoadLSU::load(gptr);
+              
+              //buffer[i][j] = in[r * colonne + c];
             }
           }
           
           [[intel::loop_coalesce(2)]]
           for (size_t i = 0; i < tTuile; i++) {
+            #pragma unroll (8)  
             for (size_t j = 0; j < tTuile; j++) {
               //size_t r = b * tTuile + i;
               //size_t c = a * tTuile + j;
               LSU512::store( sycl::address_space_cast<
                 sycl::access::address_space::global_space,
-                sycl::access::decorated::no>(&out[(b * tTuile + i) * ligne + (a * tTuile + j)]), buffer[j][i]);
+                sycl::access::decorated::no>(&out[(b * tTuile + i) * ligne + (a * tTuile + j)]), buffer[toto  % 4 ][j][i]);
               //out[r * ligne + c] = buffer[j][i];
             }
           }
+          
         }
+        
     }
 
         
@@ -128,8 +147,8 @@ int main() {
               << q.get_device().get_info<sycl::info::device::name>()
               << '\n';
 
-    const uint32_t rows     = 64 ;
-    const uint32_t cols     = 64 ;
+    const uint32_t rows     = 128 ;
+    const uint32_t cols     = 128 ;
     const size_t   elements = size_t(rows) * cols;
 
     // Allocation des tableaux de Complex
