@@ -4,8 +4,8 @@
 
 #define tTuile 4
 
-static constexpr std::size_t ligne = 8;
-static constexpr std::size_t colonne = 12;
+static constexpr std::size_t ligne = 12;
+static constexpr std::size_t colonne = 8;
 
 void filTab(int (*t0)[colonne]){
     for (size_t i = 0 ; i < ligne ; i++){
@@ -60,31 +60,34 @@ int main () {
     // remplie le tableau d'entrée
     std::cout << "Matrice d'origine - ligne : " << ligne << " colonne : " << colonne << std::endl << "\n" ; 
     filTab(t0);
-    std::cout << "\n" ;
 
     size_t nbPassH = colonne / tTuile ;
     size_t nbPassV = ligne / tTuile ;
-    int i = 1 ; 
 
-    for (size_t a = 0 ; a < nbPassV  ; a++ ) {
-        for (size_t b = 0 ; b < nbPassH ; b++ ) {
-            
-            for (u_int8_t i = 0 ; i < tTuile ; i++){
-                for (u_int8_t j = 0 ; j < tTuile ; j++){
-                    buffer[i][j] = t0[a*tTuile + i][b*tTuile + j];
-                }
+    size_t totalPass = nbPassV * nbPassH;
+    for (size_t pass = 0; pass < totalPass; ++pass) {
+        size_t a = pass / nbPassH;  // ligne de tuiles
+        size_t b = pass % nbPassH;  // colonne de tuiles
+
+        // Extraction du bloc dans buffer
+        for (u_int8_t i = 0; i < tTuile; ++i) {
+            for (u_int8_t j = 0; j < tTuile; ++j) {
+                buffer[i][j] = t0[a * tTuile + i][b * tTuile + j];
             }
-            std::cout << "Buffer" << i << "\n\n" ; 
-            AfficheTuile(buffer);
-            for (u_int8_t i = 0 ; i < tTuile ; i++){
-                for (u_int8_t j = 0 ; j < tTuile ; j++){
-                    t1[b*tTuile + i][a*tTuile + j] = buffer[j][i];
-                }
-            }
-            viewTab(t1);
         }
-        i++ ;
+
+        std::cout << "\n Buffer " << (pass + 1) << "\n\n";
+        AfficheTuile(buffer);
+
+        // Écriture transposée dans t1
+        for (u_int8_t i = 0; i < tTuile; ++i) {
+            for (u_int8_t j = 0; j < tTuile; ++j) {
+                t1[b * tTuile + i][a * tTuile + j] = buffer[j][i];
+            }
+        }
+        viewTab(t1);
     }
+
 
     delete[] t0 ;
     delete[] t1 ;
