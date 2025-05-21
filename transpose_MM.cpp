@@ -51,8 +51,8 @@ using LSU512 = sycl::ext::intel::lsu<
   sycl::ext::intel::statically_coalesce<true>>;// on garde l’analyse simple
 
 using LoadLSU = sycl::ext::intel::lsu<
-    sycl::ext::intel::burst_coalesce<true>,          // FIFO + precharge des bursts
-    sycl::ext::intel::statically_coalesce<true>// garde le regroupement à 512 b
+    sycl::ext::intel::burst_coalesce<true>,          
+    sycl::ext::intel::statically_coalesce<true>
 >;
 
 struct Transpose {
@@ -77,59 +77,56 @@ struct Transpose {
           sycl::ext::intel::experimental::conduit})>
       cols; // colonne
 
-    [[intel::kernel_args_restrict]]
-    void operator()() const {
-
-      [[intel::max_replicates(1)]]Complex buffer[nbBuffer][32][32];
-
-      [[intel::fpga_register]]   size_t ligne = rows ;
-      [[intel::fpga_register]] size_t colonne = cols ; // ça sera 2048 au max , ça changera pas
-
-      size_t nbPassH = colonne / tTuile ;
-      size_t nbPassV = ligne / tTuile ;
-      size_t totalPass = nbPassV * nbPassH ;
-
-      int toto = 0 ;
-
-      [[intel::ivdep(buffer)]]
-      for (size_t pass = 0; pass < totalPass; ++pass) {
-        size_t a = pass / nbPassH;  // ligne de tuiles
-        size_t b = pass % nbPassH;  // colonne de tuiles
-
-
-          toto++;
-          
-          [[intel::loop_coalesce(2)]]
-          for (size_t i = 0; i < tTuile; i++) {
-            #pragma unroll 
-            for (size_t j = 0; j < tTuile; j++) {
-              size_t r = a * tTuile + i;
-              size_t c = b * tTuile + j;
-              
-              auto gptr = sycl::address_space_cast<
-              sycl::access::address_space::global_space,
-              sycl::access::decorated::no>(&in[r*colonne + c]);
-              buffer[ toto % nbBuffer ][i][j] = LoadLSU::load(gptr);
-              
-              //buffer[i][j] = in[r * colonne + c];
-            }
-          }
-          
-          [[intel::loop_coalesce(2)]]
-          for (size_t i = 0; i < tTuile; i++) {
-            #pragma unroll (8)  
-            for (size_t j = 0; j < tTuile; j++) {
-              //size_t r = b * tTuile + i;
-              //size_t c = a * tTuile + j;
-              LSU512::store( sycl::address_space_cast<
+      [[intel::kernel_args_restrict]]
+      void operator()() const {
+  
+        [[intel::max_replicates(1)]]Complex buffer[4][32][32];
+  
+        [[intel::fpga_register]]   size_t ligne = rows ;
+        [[intel::fpga_register]] size_t colonne = cols ; // ça sera 2048 au max , ça changera pas
+  
+        size_t nbPassH = colonne / tTuile ;
+        size_t nbPassV = ligne / tTuile ;
+  
+        int toto = 0 ;
+  
+        [[intel::loop_coalesce(2),intel::ivdep(buffer),intel::max_concurrency(3)]]
+        for (size_t a = 0 ; a < nbPassV  ; a++ ) {
+          [[intel::ivdep(buffer)]]
+          for (size_t b = 0 ; b < nbPassH ; b++ ) {
+  
+            toto++;
+            
+            [[intel::loop_coalesce(2)]]
+            for (size_t i = 0; i < tTuile; i++) {
+              #pragma unroll 
+              for (size_t j = 0; j < tTuile; j++) {
+                size_t r = a * tTuile + i;
+                size_t c = b * tTuile + j;
+                
+                auto gptr = sycl::address_space_cast<
                 sycl::access::address_space::global_space,
-                sycl::access::decorated::no>(&out[(b * tTuile + i) * ligne + (a * tTuile + j)]), buffer[toto  % nbBuffer ][j][i]);
-              //out[r * ligne + c] = buffer[j][i];
+                sycl::access::decorated::no>(&in[r*colonne + c]);
+                buffer[ toto % 4 ][i][j] = LoadLSU::load(gptr);
+              }
             }
+            
+            [[intel::loop_coalesce(2)]]
+            for (size_t i = 0; i < tTuile; i++) {
+              #pragma unroll (8)  
+              for (size_t j = 0; j < tTuile; j++) {
+                LSU512::store( sycl::address_space_cast<
+                  sycl::access::address_space::global_space,
+                  sycl::access::decorated::no>(&out[(b * tTuile + i) * ligne + (a * tTuile + j)]), buffer[toto  % 4 ][j][i]);
+              }
+            }
+            
           }
+          
       }
-                  
-  }  
+  
+          
+    }  
 };
 
 int main() {
@@ -147,9 +144,9 @@ int main() {
               << q.get_device().get_info<sycl::info::device::name>()
               << '\n';
 
-    const uint32_t rows     = 64 ;
-    const uint32_t cols     = 64 ;
-    const size_t   elements = size_t(rows) * cols;
+    const uint32_t rows     = 256 ; // 256 ok
+    const uint32_t cols     = 256 ; // 256 ok
+    const uint32_t   elements = rows * cols;
 
     // Allocation des tableaux de Complex
      Complex* a = sycl::malloc_shared<Complex>(
