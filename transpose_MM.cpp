@@ -90,7 +90,7 @@ struct Transpose {
   
         int toto = 0 ;
   
-        [[intel::loop_coalesce(2),intel::ivdep(buffer),intel::max_concurrency(3)]]
+        [[intel::loop_coalesce(2),intel::ivdep(buffer),intel::max_concurrency(4)]]
         for (size_t a = 0 ; a < nbPassV  ; a++ ) {
           [[intel::ivdep(buffer)]]
           for (size_t b = 0 ; b < nbPassH ; b++ ) {
@@ -144,8 +144,8 @@ int main() {
               << q.get_device().get_info<sycl::info::device::name>()
               << '\n';
 
-    const uint32_t rows     = 256 ; // 256 ok
-    const uint32_t cols     = 256 ; // 256 ok
+    const uint32_t rows     = 512 ; // 256 ok
+    const uint32_t cols     = 512 ; // 256 ok
     const uint32_t   elements = rows * cols;
 
     // Allocation des tableaux de Complex
