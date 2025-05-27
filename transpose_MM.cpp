@@ -5,11 +5,11 @@
 
 #include <algorithm>
 
-constexpr size_t nbBuffer = 4 ;
+constexpr uint16_t nbBuffer = 8 ;
 
 constexpr int Kbl1 = 1;
 constexpr int Kbl2 = 2;
-constexpr size_t tTuile = 32 ;
+constexpr uint16_t tTuile = 16 ;
 
 class TransposeKernel;
 class IdPipeA;
@@ -28,12 +28,12 @@ using Complex   = ac_complex<float>;
 using in_props = decltype(
   sycl::ext::oneapi::experimental::properties{
       sycl::ext::intel::experimental::buffer_location<Kbl1>,
-      sycl::ext::intel::experimental::dwidth<512>, //512
+      sycl::ext::intel::experimental::dwidth<256>, //512
       sycl::ext::intel::experimental::maxburst<4>, // 4
       sycl::ext::intel::experimental::latency<0>,
       sycl::ext::intel::experimental::read_write_mode_read,
       // un Complex fait 2×32 bits = 64 bits = 8 octets d'alignement
-      sycl::ext::oneapi::experimental::alignment<64>}); //64
+      sycl::ext::oneapi::experimental::alignment<32>}); //64
 
 // Propriétés pour l'annotation de l'output
 using out_props = decltype(
@@ -80,44 +80,47 @@ struct Transpose {
       [[intel::kernel_args_restrict]]
       void operator()() const {
   
-        [[intel::max_replicates(1)]]Complex buffer[4][32][32];
+        [[intel::max_replicates(1),intel::fpga_memory("BLOCK_RAM")]]Complex buffer[nbBuffer][tTuile][tTuile];
   
-        [[intel::fpga_register]]   size_t ligne = rows ;
-        [[intel::fpga_register]] size_t colonne = cols ; // ça sera 2048 au max , ça changera pas
+        [[intel::fpga_register]]   uint16_t ligne = rows ;
+        [[intel::fpga_register]] uint16_t colonne = cols ; // ça sera 2048 au max , ça changera pas
+
+        //uint8_t
   
-        size_t nbPassH = colonne / tTuile ;
-        size_t nbPassV = ligne / tTuile ;
+        uint8_t nbPassH = colonne / tTuile ;
+        uint8_t nbPassV = ligne / tTuile ;
+
+        int IDbuffer = 0 ;
+        //,intel::max_concurrency(nbBuffer)
   
-        int toto = 0 ;
-  
-        [[intel::loop_coalesce(2),intel::ivdep(buffer),intel::max_concurrency(4)]]
-        for (size_t a = 0 ; a < nbPassV  ; a++ ) {
+        [[intel::loop_coalesce(2),intel::ivdep(buffer),intel::max_concurrency(nbBuffer),intel::initiation_interval(1)]]
+        for (uint8_t a = 0 ; a < nbPassV  ; a++ ) {
           [[intel::ivdep(buffer)]]
-          for (size_t b = 0 ; b < nbPassH ; b++ ) {
+          for (uint8_t b = 0 ; b < nbPassH ; b++ ) {
   
-            toto++;
+            IDbuffer++;
             
             [[intel::loop_coalesce(2)]]
-            for (size_t i = 0; i < tTuile; i++) {
-              #pragma unroll 
-              for (size_t j = 0; j < tTuile; j++) {
-                size_t r = a * tTuile + i;
-                size_t c = b * tTuile + j;
+            for (uint8_t i = 0; i < tTuile; i++) {
+              #pragma unroll
+              for (uint8_t j = 0; j < tTuile; j++) {
+                uint16_t r = a * tTuile + i;
+                uint16_t c = b * tTuile + j;
                 
                 auto gptr = sycl::address_space_cast<
                 sycl::access::address_space::global_space,
                 sycl::access::decorated::no>(&in[r*colonne + c]);
-                buffer[ toto % 4 ][i][j] = LoadLSU::load(gptr);
+                buffer[IDbuffer%nbBuffer][i][j] = LoadLSU::load(gptr);
               }
             }
             
             [[intel::loop_coalesce(2)]]
-            for (size_t i = 0; i < tTuile; i++) {
+            for (uint8_t i = 0; i < tTuile; i++) {
               #pragma unroll (8)  
-              for (size_t j = 0; j < tTuile; j++) {
+              for (uint8_t j = 0; j < tTuile; j++) {
                 LSU512::store( sycl::address_space_cast<
                   sycl::access::address_space::global_space,
-                  sycl::access::decorated::no>(&out[(b * tTuile + i) * ligne + (a * tTuile + j)]), buffer[toto  % 4 ][j][i]);
+                  sycl::access::decorated::no>(&out[(b * tTuile + i) * ligne + (a * tTuile + j)]), buffer[IDbuffer%nbBuffer][j][i]);
               }
             }
             
@@ -144,7 +147,7 @@ int main() {
               << q.get_device().get_info<sycl::info::device::name>()
               << '\n';
 
-    const uint32_t rows     = 512 ; // 256 ok
+    const uint32_t rows     = 256 ; // 256 ok
     const uint32_t cols     = 512 ; // 256 ok
     const uint32_t   elements = rows * cols;
 
