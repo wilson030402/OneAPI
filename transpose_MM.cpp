@@ -80,7 +80,7 @@ struct Transpose {
       [[intel::kernel_args_restrict]]
       void operator()() const {
   
-        [[intel::max_replicates(1),intel::fpga_memory("BLOCK_RAM")]]Complex buffer[nbBuffer][tTuile][tTuile];
+        [[intel::max_replicates(1),intel::fpga_memory("MLAB")]]Complex buffer[nbBuffer][tTuile][tTuile];
   
         [[intel::fpga_register]]   uint16_t ligne = rows ;
         [[intel::fpga_register]] uint16_t colonne = cols ; // ça sera 2048 au max , ça changera pas
