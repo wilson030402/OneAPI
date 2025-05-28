@@ -5,6 +5,7 @@
 #include <sycl/ext/intel/ac_types/ac_fixed.hpp>
 
 class ReferenceKernel;
+class IDInputPipe ; 
 constexpr int Kbl1 = 1;
 constexpr int Kbl2 = 2;
 
@@ -34,13 +35,11 @@ using out_props = decltype(
 
 using Complex = ac_complex<int16_t>;
 using ComplexF = ac_complex<fixed_s14>;
-using wide_t    = ac_fixed<32, 4, true>;
-
+using wide_t   = ac_fixed<32, 4, true>;
+using InputPipe = sycl::ext::intel::experimental::pipe<
+    IDInputPipe, Complex, 0, pipe_props>;
 
 struct Reference {
-    sycl::ext::oneapi::experimental::annotated_arg<
-        Complex*,in_props> src; 
-
     sycl::ext::oneapi::experimental::annotated_arg<
         ComplexF*,out_props> dst; 
 
@@ -51,23 +50,25 @@ struct Reference {
     [[intel::kernel_args_restrict]]
     void operator ()() const {
         for (uint16_t i = 0 ; i < N ; i++){
+            
+            const Complex input = InputPipe::read() ;
 
-    // a) Entrée : int16_t  → float
-    float re_f = static_cast<float>(src[i].real());
-    float im_f = static_cast<float>(src[i].imag());
+            // a) Entrée : int16_t  → float
+            const float re_f = static_cast<float>(input.real());
+            const float im_f = static_cast<float>(input.imag());
 
-    // b) |z|² = a² + b²
-    float norm2 = re_f * re_f + im_f * im_f;
+            // b) |z|² = a² + b²
+            const float norm2 = re_f * re_f + im_f * im_f;
 
-    // c) conj(z)/|z|²  (toujours en float)
-    float out_re_f =  re_f / norm2;   // partie réelle
-    float out_im_f = -im_f / norm2;   // partie imaginaire (conjugaison)
+            // c) conj(z)/|z|²  (toujours en float)
+            const float out_re_f =  re_f / norm2;   // partie réelle
+            const float out_im_f = -im_f / norm2;   // partie imaginaire (conjugaison)
 
-    fixed_s14 a = fixed_s14(out_re_f) ;
-    fixed_s14 b = fixed_s14(out_im_f) ; 
+            const fixed_s14 a = fixed_s14(out_re_f) ;
+            const fixed_s14 b = fixed_s14(out_im_f) ; 
 
-    // d) Re-quantification float → S1.14
-    dst[i] = ComplexF{a,b};
+            // d) Re-quantification float → S1.14
+            dst[i] = ComplexF{a,b};
     }
 }
 };
@@ -90,40 +91,56 @@ int main() {
       const uint32_t  N = 8;
   
       // Allocation des tableaux de Complex
-       Complex* src = sycl::malloc_shared<Complex>(N, q,
-        {sycl::ext::intel::experimental::property::usm::buffer_location(Kbl1)}) ;
-  
       ComplexF* dst = sycl::malloc_shared<ComplexF>(N, q,
         {sycl::ext::intel::experimental::property::usm::buffer_location(Kbl2)}) ;
-  
+
+      Complex* src = new Complex [N] ;
+      ac_complex<float>* ref = new ac_complex<float> [N] ;
+
       // Génération des nombres
       for (uint16_t i = 0 ; i < N ; i++){
-        auto nombre = i + 1 ;
-        src[i].real() = nombre ;
-        src[i].imag() = nombre ;
-        std::cout << "src[" << i << "] = (" << src[i].real() << ", " 
-                            << src[i].imag() << "j)" << std::endl ; 
+        uint16_t reel = i + 1 ;
+        uint16_t imag = i + 1 ;
+        Complex nbWrite = {reel,imag} ;
+        src[i] = nbWrite ; 
+        InputPipe::write(q,nbWrite);
+        /*std::cout << "src[" << i << "] = (" 
+                            << reel << ", " 
+                            << imag << "j)" << std::endl ; */ // Affichage de la source
       }
-      
-  
-      std::cout << "\nAprès inverse multiplicatif :\n";
+
+      // Le pas de la virgule fixe s1.14
+      const double pas = static_cast<double>(1)  / static_cast<double>(1<<14) ;
+      const double tol = pas / static_cast<double>(2) ;
+      //std::cout << "\nAprès inverse multiplicatif :\n";
   
       // Lancement du kernel
-      q.single_task<ReferenceKernel>(Reference{src, dst, N});
+      q.single_task<ReferenceKernel>(Reference{dst, N});
       q.wait();
   
        // Affichage et vérification
-      bool ok = true;
+      bool ok = true; 
       for (uint16_t i = 0 ; i < N ; i++){
-        std::cout << "dst[" << i << "] = (" << dst[i].real() << ", " 
-                            << dst[i].imag() << "j)" << std::endl ; 
+        float a = static_cast<float>(src[i].real());
+        float b = static_cast<float>(src[i].imag());
+        float norm2 = a*a + b*b;
+        ref[i] = { a / norm2, -b / norm2 };
+        if (((std::abs(static_cast<float>( dst[i].real().to_double()) - ref[i].real()) > tol) ||
+        (std::abs (static_cast<float>( dst[i].imag().to_double()) - ref[i].imag()) > tol))) {
+            std::cout << "dst[" << i << "] = (" << dst[i].real() << ", " 
+                            << dst[i].imag() << "j)     reference :"
+                            << "(" << ref[i].real() << ", " 
+                            << (ref[i].imag()) << "j)     "
+                            << std::endl ;
+            ok = false ;
+        }         
       }
-
   
       std::cout << (ok ? "PASSED\n" : "FAILED\n");
+      
   
-      sycl::free(src, q);
       sycl::free(dst, q);
+      delete[] src ;
       return ok ? EXIT_SUCCESS : EXIT_FAILURE; 
 
       return 0 ;
