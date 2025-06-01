@@ -3,10 +3,14 @@
 #include "exception_handler.hpp"
 #include <sycl/ext/intel/ac_types/ac_complex.hpp>
 #include <sycl/ext/intel/ac_types/ac_fixed.hpp>
+#include <sycl/ext/intel/ac_types/ac_fixed_math.hpp>
+#include <sycl/ext/intel/ac_types/ap_float_math.hpp>
 
 class ReferenceKernel;
 class IDInputPipe ; 
-constexpr int Kbl1 = 1;
+
+constexpr int SHIFT = 14;
+
 constexpr int Kbl2 = 2;
 
 using fixed_s14 = ac_fixed<16, 2, true, AC_RND_CONV, AC_SAT>;
@@ -14,20 +18,13 @@ using fixed_s14 = ac_fixed<16, 2, true, AC_RND_CONV, AC_SAT>;
 using pipe_props = decltype(
     sycl::ext::oneapi::experimental::properties(
         sycl::ext::intel::experimental::ready_latency<0>));
-
-using in_props = decltype(
-    sycl::ext::oneapi::experimental::properties{
-    sycl::ext::intel::experimental::buffer_location<Kbl1>,
-    sycl::ext::intel::experimental::dwidth<32>, //512
-    sycl::ext::intel::experimental::latency<0>,
-    sycl::ext::intel::experimental::read_write_mode_read,
-    // un Complex fait 2×32 bits = 64 bits = 8 octets d'alignement
-    sycl::ext::oneapi::experimental::alignment<4>}); //64
           
 using out_props = decltype(
     sycl::ext::oneapi::experimental::properties{
+    sycl::ext::intel::experimental::conduit , 
     sycl::ext::intel::experimental::buffer_location<Kbl2>,
     sycl::ext::intel::experimental::dwidth<32>, //512
+    sycl::ext::intel::experimental::awidth<13>, //512
     sycl::ext::intel::experimental::latency<0>,
     sycl::ext::intel::experimental::read_write_mode_write,
     // un Complex fait 2×32 bits = 64 bits = 8 octets d'alignement
@@ -35,7 +32,8 @@ using out_props = decltype(
 
 using Complex = ac_complex<int16_t>;
 using ComplexF = ac_complex<fixed_s14>;
-using wide_t   = ac_fixed<32, 4, true>;
+using accum_t = ac_fixed<32, 2, true>;
+using f32ap = ihc::ap_float<8,23>;
 using InputPipe = sycl::ext::intel::experimental::pipe<
     IDInputPipe, Complex, 0, pipe_props>;
 
@@ -48,9 +46,9 @@ struct Reference {
         sycl::ext::intel::experimental::conduit})>  N;
     
     [[intel::kernel_args_restrict]]
-    void operator ()() const {
-        for (uint16_t i = 0 ; i < N ; i++){
-            
+    void operator()() const {
+        
+        for (uint16_t i = 0; i < N; i++) {
             const Complex input = InputPipe::read() ;
 
             // a) Entrée : int16_t  → float
@@ -59,18 +57,33 @@ struct Reference {
 
             // b) |z|² = a² + b²
             const float norm2 = re_f * re_f + im_f * im_f;
+            const float norm2_inv = 1.0 / norm2 ;
 
             // c) conj(z)/|z|²  (toujours en float)
-            const float out_re_f =  re_f / norm2;   // partie réelle
-            const float out_im_f = -im_f / norm2;   // partie imaginaire (conjugaison)
+            const float out_re_f =  re_f * norm2_inv;   // partie réelle
+            const float out_im_f = -im_f * norm2_inv;   // partie imaginaire (conjugaison)
 
-            const fixed_s14 a = fixed_s14(out_re_f) ;
-            const fixed_s14 b = fixed_s14(out_im_f) ; 
+            float scaled_re = out_re_f * (1 << SHIFT);
+            // on ajoute +0.5 si positive, -0.5 si négative
+            float round_offset_re = (scaled_re >= 0.0f ? 0.5f : -0.5f);
+            int16_t raw_a = static_cast<int16_t>(scaled_re + round_offset_re);
+
+            // même chose pour la partie imaginaire
+            float scaled_im = out_im_f * (1 << SHIFT);
+            float round_offset_im = (scaled_im >= 0.0f ? 0.5f : -0.5f);
+            int16_t raw_b = static_cast<int16_t>(scaled_im + round_offset_im);
+
+            // Ensuite, on “colle” ces bits dans l'ac_fixed<16,2> sans faire de conversion float→fixed
+            ac_int<16, true> bits_a = raw_a;
+            fixed_s14 a; a.set_slc(0, bits_a);
+
+            ac_int<16, true> bits_b = raw_b;
+            fixed_s14 b; b.set_slc(0, bits_b);
 
             // d) Re-quantification float → S1.14
             dst[i] = ComplexF{a,b};
+        }
     }
-}
 };
 
 int main() {
@@ -125,6 +138,11 @@ int main() {
         float b = static_cast<float>(src[i].imag());
         float norm2 = a*a + b*b;
         ref[i] = { a / norm2, -b / norm2 };
+        std::cout << "dst[" << i << "] = (" << dst[i].real() << ", " 
+                            << dst[i].imag() << "j)     reference :"
+                            << "(" << ref[i].real() << ", " 
+                            << (ref[i].imag()) << "j)     "
+                            << std::endl ;
         if (((std::abs(static_cast<float>( dst[i].real().to_double()) - ref[i].real()) > tol) ||
         (std::abs (static_cast<float>( dst[i].imag().to_double()) - ref[i].imag()) > tol))) {
             std::cout << "dst[" << i << "] = (" << dst[i].real() << ", " 
