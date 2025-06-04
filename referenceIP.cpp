@@ -21,7 +21,6 @@ using pipe_props = decltype(
           
 using out_props = decltype(
     sycl::ext::oneapi::experimental::properties{
-    sycl::ext::intel::experimental::conduit , 
     sycl::ext::intel::experimental::buffer_location<Kbl2>,
     sycl::ext::intel::experimental::dwidth<32>, //512
     sycl::ext::intel::experimental::awidth<13>, //512
@@ -51,36 +50,29 @@ struct Reference {
         for (uint16_t i = 0; i < N; i++) {
             const Complex input = InputPipe::read() ;
 
-            // a) Entrée : int16_t  → float
-            const float re_f = static_cast<float>(input.real());
-            const float im_f = static_cast<float>(input.imag());
+            float re_f = static_cast<float>(input.real());
+            float im_f = static_cast<float>(input.imag());
 
-            // b) |z|² = a² + b²
             const float norm2 = re_f * re_f + im_f * im_f;
             const float norm2_inv = 1.0 / norm2 ;
 
-            // c) conj(z)/|z|²  (toujours en float)
-            const float out_re_f =  re_f * norm2_inv;   // partie réelle
-            const float out_im_f = -im_f * norm2_inv;   // partie imaginaire (conjugaison)
+            const float out_re_f =  re_f * norm2_inv;   
+            const float out_im_f = -im_f * norm2_inv;   
 
-            float scaled_re = out_re_f * (1 << SHIFT);
-            // on ajoute +0.5 si positive, -0.5 si négative
-            float round_offset_re = (scaled_re >= 0.0f ? 0.5f : -0.5f);
+            const float scaled_re = out_re_f * (1 << SHIFT);
+            const float round_offset_re = (scaled_re >= 0.0f ? 0.5f : -0.5f);
             int16_t raw_a = static_cast<int16_t>(scaled_re + round_offset_re);
 
-            // même chose pour la partie imaginaire
             float scaled_im = out_im_f * (1 << SHIFT);
             float round_offset_im = (scaled_im >= 0.0f ? 0.5f : -0.5f);
             int16_t raw_b = static_cast<int16_t>(scaled_im + round_offset_im);
 
-            // Ensuite, on “colle” ces bits dans l'ac_fixed<16,2> sans faire de conversion float→fixed
             ac_int<16, true> bits_a = raw_a;
             fixed_s14 a; a.set_slc(0, bits_a);
 
             ac_int<16, true> bits_b = raw_b;
             fixed_s14 b; b.set_slc(0, bits_b);
 
-            // d) Re-quantification float → S1.14
             dst[i] = ComplexF{a,b};
         }
     }
