@@ -5,11 +5,12 @@
 #include <sycl/ext/intel/ac_types/ac_fixed.hpp>
 #include <sycl/ext/intel/ac_types/ac_fixed_math.hpp>
 #include <sycl/ext/intel/ac_types/ap_float_math.hpp>
+#include <sycl/ext/intel/ac_types/ap_float.hpp>
 
 class ReferenceKernel;
 class IDInputPipe ; 
 
-constexpr int SHIFT = 14;
+constexpr int8_t SHIFT = 14;
 
 constexpr int Kbl2 = 2;
 
@@ -31,8 +32,6 @@ using out_props = decltype(
 
 using Complex = ac_complex<int16_t>;
 using ComplexF = ac_complex<fixed_s14>;
-using accum_t = ac_fixed<32, 2, true>;
-using f32ap = ihc::ap_float<8,23>;
 using InputPipe = sycl::ext::intel::experimental::pipe<
     IDInputPipe, Complex, 0, pipe_props>;
 
@@ -50,17 +49,20 @@ struct Reference {
         for (uint16_t i = 0; i < N; i++) {
             const Complex input = InputPipe::read() ;
 
-            float re_f = static_cast<float>(input.real());
-            float im_f = static_cast<float>(input.imag());
+            ac_int<16, true> re_f = input.real();
+            ac_int<16, true> im_f = input.imag();
 
-            const float norm2 = re_f * re_f + im_f * im_f;
-            const float norm2_inv = 1.0 / norm2 ;
+            ac_int<32, true> re2 = re_f * re_f ;
+            ac_int<32, true> imag2 = im_f * im_f ;
 
-            const float out_re_f =  re_f * norm2_inv;   
-            const float out_im_f = -im_f * norm2_inv;   
+            ac_int<32, true> norm2 = re2 + imag2 ;
+            const float norm2_inv = 1.0 / static_cast<float>(norm2) ;
 
-            const float scaled_re = out_re_f * (1 << SHIFT);
-            const float round_offset_re = (scaled_re >= 0.0f ? 0.5f : -0.5f);
+            float out_re_f =  static_cast<float>(re_f) * norm2_inv;   
+            float out_im_f = static_cast<float>(-im_f) * norm2_inv;   
+
+            float scaled_re = out_re_f * (1 << SHIFT);
+            float round_offset_re = (scaled_re >= 0.0f ? 0.5f : -0.5f);
             int16_t raw_a = static_cast<int16_t>(scaled_re + round_offset_re);
 
             float scaled_im = out_im_f * (1 << SHIFT);
