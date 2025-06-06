@@ -12,9 +12,10 @@ class IDInputPipe ;
 
 constexpr int8_t SHIFT = 14;
 
-constexpr int Kbl2 = 2;
+constexpr int Kbl0 = 0;
 
 using fixed_s14 = ac_fixed<16, 2, true, AC_RND_CONV, AC_SAT>;
+using fixed_s64 = ac_fixed<64, 31, false, AC_RND_CONV, AC_SAT>;
 
 using pipe_props = decltype(
     sycl::ext::oneapi::experimental::properties(
@@ -22,7 +23,7 @@ using pipe_props = decltype(
           
 using out_props = decltype(
     sycl::ext::oneapi::experimental::properties{
-    sycl::ext::intel::experimental::buffer_location<Kbl2>,
+    sycl::ext::intel::experimental::buffer_location<Kbl0>,
     sycl::ext::intel::experimental::dwidth<32>, //512
     sycl::ext::intel::experimental::awidth<13>, //512
     sycl::ext::intel::experimental::latency<0>,
@@ -46,7 +47,7 @@ struct Reference {
     [[intel::kernel_args_restrict]]
     void operator()() const {
         
-        for (uint16_t i = 0; i < N; i++) {
+        for ( uint16_t i = 0; i < N; i++) {
             const Complex input = InputPipe::read() ;
 
             ac_int<16, true> re_f = input.real();
@@ -55,8 +56,15 @@ struct Reference {
             ac_int<32, true> re2 = re_f * re_f ;
             ac_int<32, true> imag2 = im_f * im_f ;
 
-            ac_int<32, true> norm2 = re2 + imag2 ;
-            const float norm2_inv = 1.0 / static_cast<float>(norm2) ;
+            ac_int<32, false> norm2 = re2 + imag2 ;
+
+            ihc::ap_float<8,23> norm2_f = norm2 ; 
+            ihc::ap_float<8,23> norm2_f_inv = ihc_recip(norm2_f) ;
+            
+            //const float norm2_inv = 1.0 / norm2_f ;
+            //const float norm2_inv = 1.0f / static_cast<float>(norm2) ;
+
+            float norm2_inv = static_cast<float>(norm2_f_inv) ;
 
             float out_re_f =  static_cast<float>(re_f) * norm2_inv;   
             float out_im_f = static_cast<float>(-im_f) * norm2_inv;   
@@ -95,14 +103,17 @@ int main() {
                 << q.get_device().get_info<sycl::info::device::name>()
                 << '\n';
 
-      const uint32_t  N = 8;
+      const uint16_t  N = 2048; // -32768 à 32767
   
       // Allocation des tableaux de Complex
       ComplexF* dst = sycl::malloc_shared<ComplexF>(N, q,
-        {sycl::ext::intel::experimental::property::usm::buffer_location(Kbl2)}) ;
+        {sycl::ext::intel::experimental::property::usm::buffer_location(Kbl0)}) ;
 
       Complex* src = new Complex [N] ;
       ac_complex<float>* ref = new ac_complex<float> [N] ;
+
+      // Lancement du kernel
+      q.single_task<ReferenceKernel>(Reference{dst, N});
 
       // Génération des nombres
       for (uint16_t i = 0 ; i < N ; i++){
@@ -121,8 +132,7 @@ int main() {
       const double tol = pas / static_cast<double>(2) ;
       //std::cout << "\nAprès inverse multiplicatif :\n";
   
-      // Lancement du kernel
-      q.single_task<ReferenceKernel>(Reference{dst, N});
+      
       q.wait();
   
        // Affichage et vérification
