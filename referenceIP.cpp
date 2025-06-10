@@ -5,17 +5,15 @@
 #include <sycl/ext/intel/ac_types/ac_fixed.hpp>
 #include <sycl/ext/intel/ac_types/ac_fixed_math.hpp>
 #include <sycl/ext/intel/ac_types/ap_float_math.hpp>
-#include <sycl/ext/intel/ac_types/ap_float.hpp>
 
 class ReferenceKernel;
 class IDInputPipe ; 
 
-constexpr int8_t SHIFT = 14;
+constexpr int SHIFT = 14;
 
-constexpr int Kbl0 = 0;
+constexpr int Kbl2 = 2;
 
 using fixed_s14 = ac_fixed<16, 2, true, AC_RND_CONV, AC_SAT>;
-using fixed_s64 = ac_fixed<64, 31, false, AC_RND_CONV, AC_SAT>;
 
 using pipe_props = decltype(
     sycl::ext::oneapi::experimental::properties(
@@ -23,7 +21,7 @@ using pipe_props = decltype(
           
 using out_props = decltype(
     sycl::ext::oneapi::experimental::properties{
-    sycl::ext::intel::experimental::buffer_location<Kbl0>,
+    sycl::ext::intel::experimental::buffer_location<Kbl2>,
     sycl::ext::intel::experimental::dwidth<32>, //512
     sycl::ext::intel::experimental::awidth<13>, //512
     sycl::ext::intel::experimental::latency<0>,
@@ -33,8 +31,14 @@ using out_props = decltype(
 
 using Complex = ac_complex<int16_t>;
 using ComplexF = ac_complex<fixed_s14>;
+using accum_t = ac_fixed<32, 2, true>;
+using f32ap = ihc::ap_float<8,23>;
 using InputPipe = sycl::ext::intel::experimental::pipe<
     IDInputPipe, Complex, 0, pipe_props>;
+
+using LSUStore = sycl::ext::intel::lsu<
+  sycl::ext::intel::burst_coalesce<false>,      // agrégation en bursts
+  sycl::ext::intel::statically_coalesce<true>>;// on garde l’analyse simple
 
 struct Reference {
     sycl::ext::oneapi::experimental::annotated_arg<
@@ -43,34 +47,30 @@ struct Reference {
     sycl::ext::oneapi::experimental::annotated_arg<uint16_t,
         decltype(sycl::ext::oneapi::experimental::properties{
         sycl::ext::intel::experimental::conduit})>  N;
+
+    auto get(sycl::ext::oneapi::experimental::properties_tag) {
+      return sycl::ext::oneapi::experimental::properties {
+      sycl::ext::intel::experimental::streaming_interface<>
+      }; 
+    }    
     
     [[intel::kernel_args_restrict]]
     void operator()() const {
         
-        for ( uint16_t i = 0; i < N; i++) {
+        for (uint16_t i = 0; i < N; i++) {
             const Complex input = InputPipe::read() ;
 
-            ac_int<16, true> re_f = input.real();
-            ac_int<16, true> im_f = input.imag();
+            float re_f = static_cast<float>(input.real());
+            float im_f = static_cast<float>(input.imag());
 
-            ac_int<32, true> re2 = re_f * re_f ;
-            ac_int<32, true> imag2 = im_f * im_f ;
+            const float norm2 = re_f * re_f + im_f * im_f;
+            const float norm2_inv = 1.0 / norm2 ;
 
-            ac_int<32, false> norm2 = re2 + imag2 ;
+            const float out_re_f =  re_f * norm2_inv;   
+            const float out_im_f = -im_f * norm2_inv;   
 
-            ihc::ap_float<8,23> norm2_f = norm2 ; 
-            ihc::ap_float<8,23> norm2_f_inv = ihc_recip(norm2_f) ;
-            
-            //const float norm2_inv = 1.0 / norm2_f ;
-            //const float norm2_inv = 1.0f / static_cast<float>(norm2) ;
-
-            float norm2_inv = static_cast<float>(norm2_f_inv) ;
-
-            float out_re_f =  static_cast<float>(re_f) * norm2_inv;   
-            float out_im_f = static_cast<float>(-im_f) * norm2_inv;   
-
-            float scaled_re = out_re_f * (1 << SHIFT);
-            float round_offset_re = (scaled_re >= 0.0f ? 0.5f : -0.5f);
+            const float scaled_re = out_re_f * (1 << SHIFT);
+            const float round_offset_re = (scaled_re >= 0.0f ? 0.5f : -0.5f);
             int16_t raw_a = static_cast<int16_t>(scaled_re + round_offset_re);
 
             float scaled_im = out_im_f * (1 << SHIFT);
@@ -83,7 +83,9 @@ struct Reference {
             ac_int<16, true> bits_b = raw_b;
             fixed_s14 b; b.set_slc(0, bits_b);
 
-            dst[i] = ComplexF{a,b};
+            LSUStore::store( sycl::address_space_cast<
+              sycl::access::address_space::global_space,
+              sycl::access::decorated::no>(&dst[i]),ComplexF{a,b});
         }
     }
 };
@@ -103,22 +105,19 @@ int main() {
                 << q.get_device().get_info<sycl::info::device::name>()
                 << '\n';
 
-      const uint16_t  N = 2048; // -32768 à 32767
+      const uint32_t  N = 2048;
   
       // Allocation des tableaux de Complex
       ComplexF* dst = sycl::malloc_shared<ComplexF>(N, q,
-        {sycl::ext::intel::experimental::property::usm::buffer_location(Kbl0)}) ;
+        {sycl::ext::intel::experimental::property::usm::buffer_location(Kbl2)}) ;
 
       Complex* src = new Complex [N] ;
       ac_complex<float>* ref = new ac_complex<float> [N] ;
 
-      // Lancement du kernel
-      q.single_task<ReferenceKernel>(Reference{dst, N});
-
       // Génération des nombres
       for (uint16_t i = 0 ; i < N ; i++){
-        uint16_t reel = i + 1 ;
-        uint16_t imag = i + 1 ;
+        uint16_t reel = (i + 1) % 128 ;
+        uint16_t imag = (i + 1) % 128 ;
         Complex nbWrite = {reel,imag} ;
         src[i] = nbWrite ; 
         InputPipe::write(q,nbWrite);
@@ -132,7 +131,8 @@ int main() {
       const double tol = pas / static_cast<double>(2) ;
       //std::cout << "\nAprès inverse multiplicatif :\n";
   
-      
+      // Lancement du kernel
+      q.single_task<ReferenceKernel>(Reference{dst, N});
       q.wait();
   
        // Affichage et vérification
